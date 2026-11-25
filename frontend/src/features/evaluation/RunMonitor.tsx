@@ -1,5 +1,17 @@
 import { useEffect, useState } from "react";
 import { apiGet, apiGetPage } from "../../shared/api";
+import { TableWrap } from "../../shared/ui/TableWrap";
+
+type OnlineBadcase = {
+  enabled?: boolean;
+  hits?: number | null;
+  aborted?: number | null;
+  max_out_len_hits?: number | null;
+  wasted_chars?: number | null;
+  wasted_ms?: number | null;
+  details?: Record<string, unknown>[] | null;
+  collection_error?: string;
+};
 
 type Monitor = {
   datasets?: (Monitor & { dataset?: string })[];
@@ -23,6 +35,7 @@ type Monitor = {
   diagnostics?: string[];
   log_available?: boolean;
   job_dir_available?: boolean;
+  online_badcase?: OnlineBadcase | null;
   log?: { endpoint: string; sha256: string } | null;
 };
 type Snapshot = { id: string; kind: string; sha256: string; created_at: string; dataset?: string | null; summary?: string; summary_status?: string };
@@ -58,6 +71,69 @@ const stamp = (value?: number | string | null) => {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN");
 };
 
+const count = (value?: number | null) => (typeof value === "number" ? value : "—");
+const cell = (value: unknown) =>
+  value === null || value === undefined || value === "" ? "—" : String(value);
+const REASON_LABEL: Record<string, string> = {
+  short_cycle: "短周期复读",
+  long_segment: "长片段复读",
+};
+
+function OnlineBadcaseLine({ value }: { value?: OnlineBadcase | null }) {
+  if (!value?.enabled) return null;
+  return (
+    <small className="muted" data-testid="online-badcase-line">
+      在线 badcase：命中 {count(value.hits)} · 已中止 {count(value.aborted)} · 触顶{" "}
+      {count(value.max_out_len_hits)} · 浪费 {count(value.wasted_chars)} 字 /{" "}
+      {count(value.wasted_ms)} ms（来自原生预测记录）
+    </small>
+  );
+}
+
+function OnlineBadcasePanel({ value }: { value?: OnlineBadcase | null }) {
+  if (!value?.enabled) return null;
+  const details = Array.isArray(value.details) ? value.details.slice(0, 20) : [];
+  return (
+    <section className="card stack" aria-label="在线 badcase 检测" data-testid="online-badcase-panel">
+      <h4>在线 badcase 检测</h4>
+      <dl className="detail-properties">
+        <div><dt>命中样本</dt><dd>{count(value.hits)}</dd></div>
+        <div><dt>流式中止</dt><dd>{count(value.aborted)}</dd></div>
+        <div><dt>输出触顶</dt><dd>{count(value.max_out_len_hits)}</dd></div>
+        <div><dt>浪费字符</dt><dd>{count(value.wasted_chars)}</dd></div>
+        <div><dt>浪费耗时</dt><dd>{count(value.wasted_ms)} ms</dd></div>
+      </dl>
+      {value.collection_error && (
+        <p className="notice">检测采集暂不可用；不影响测评执行与评分。</p>
+      )}
+      {details.length > 0 ? (
+        <TableWrap>
+          <table>
+            <thead>
+              <tr><th>样本</th><th>原因</th><th>命中位置</th><th>总字符</th><th>浪费耗时</th><th>处理</th></tr>
+            </thead>
+            <tbody>
+              {details.map((row, index) => (
+                <tr key={String(row.case_id ?? index)}>
+                  <td>{cell(row.case_id)}</td>
+                  <td>{REASON_LABEL[String(row.reason)] || cell(row.reason)}</td>
+                  <td>{cell(row.detected_at_chars)}</td>
+                  <td>{cell(row.total_chars)}</td>
+                  <td>{cell(row.wasted_ms)}</td>
+                  <td>{row.aborted ? "已中止" : row.max_out_len_hit ? "输出触顶" : "仅打标"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </TableWrap>
+      ) : (
+        <p className="muted">暂无命中样本。</p>
+      )}
+      <p className="muted">明细来自原生预测记录，按样本去重；仅打标不中断生成，不改变评分口径。</p>
+    </section>
+  );
+}
+
 function MonitorProgress({ value, error = false, stage, terminal = false, compact = false }: { compact?: boolean; value: Monitor | null; error?: boolean; stage?: string; terminal?: boolean }) {
   const total = value?.total_count;
   const done = value?.finish_count;
@@ -78,6 +154,7 @@ function MonitorProgress({ value, error = false, stage, terminal = false, compac
       {stale ? "数据已过期，保留最后观测值" : known ? value?.source === "archived_case_executions" ? "进度来自已归档执行记录，不代表历史实时监控或评分通过" : "进度来自工具执行记录，执行完成不代表评分通过" : terminal ? "任务已结束，未记录有效样本计数" : "样本计数尚未返回，当前阶段与耗时持续更新"}
       {value?.snapshot_kind === "final" ? " · 终态已归档" : value?.snapshot_kind === "last_observed" ? " · 仅最后观测（非终态）" : ""}
     </small>}
+    {!compact && <OnlineBadcaseLine value={value?.online_badcase} />}
   </div>;
 }
 
@@ -259,6 +336,7 @@ export function RunMonitor({ runId, terminal }: { runId: string; terminal: boole
             <span className="dataset-monitor-state">{STATUS_LABEL[latest.tool_status || ""] || latest.tool_status || "等待中"}{latest.stale && " · 已过期"}</span>
             <MonitorProgress value={latest} compact error={Boolean(error)} terminal={latest.snapshot_kind === "final"} />
           </summary>
+          <OnlineBadcaseLine value={latest.online_badcase} />
           <ol className="dataset-monitor-history" aria-label={`${name} 监控记录`}>
             {records.map((item, index) => <li key={item.attempt ?? index}>
               <b>{index === 0 ? "最新记录" : "历史记录"} · {STATUS_LABEL[item.tool_status || ""] || item.tool_status || "等待中"}</b>
@@ -272,6 +350,7 @@ export function RunMonitor({ runId, terminal }: { runId: string; terminal: boole
       {(value.stale || error) && (
         <p className="notice" role="status">数据已过期 / 不可达，以下为最后观测值；采集失败不会触发测评重启。</p>
       )}
+      {!multi && <OnlineBadcasePanel value={value.online_badcase} />}
 
       <div className="tabs monitor-tabs">
         {([["overview", "概览"], ["snapshots", "归档快照"], ["log", "日志"]] as const).map(([key, label]) => (

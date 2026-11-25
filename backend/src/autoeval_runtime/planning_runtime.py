@@ -527,6 +527,159 @@ def scope_harbor_compose(folder, environment):
     environment["PATH"] = str(wrapper_dir) + os.pathsep + environment.get("PATH", "")
 
 
+class OnlineBadcaseObserver:
+    """Incrementally read ``online_badcase`` tags from this job's predictions.
+
+    The observer is read-only and bounded: it never raises into the execution
+    loop, never touches model requests, and only returns counters plus a short
+    list of the most recent hits.
+    """
+
+    DETAIL_LIMIT = 20
+    DETAIL_FIELDS = (
+        "reason",
+        "period",
+        "detected_at_chars",
+        "total_chars",
+        "repeat_chars",
+        "wasted_ms",
+        "aborted",
+        "max_out_len_hit",
+    )
+
+    def __init__(self, output, model_abbr):
+        self.output = Path(output)
+        self.model_abbr = str(model_abbr)
+        self._files = {}
+        self._seen = set()
+        self._details = []
+
+    def poll(self):
+        # AISBench writes into a timestamped run directory below the work dir.
+        directories = sorted(
+            path
+            for path in self.output.rglob(self.model_abbr)
+            if path.is_dir() and path.parent.name == "predictions"
+        )
+        for directory in directories:
+            for path in sorted(directory.glob("*.jsonl")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                self._read(path)
+        totals = {
+            "hits": 0,
+            "aborted": 0,
+            "max_out_len_hits": 0,
+            "wasted_chars": 0,
+            "wasted_ms": 0,
+        }
+        for state in self._files.values():
+            for key in totals:
+                totals[key] += state[key]
+        return {
+            "enabled": True,
+            **totals,
+            "details": list(self._details[-self.DETAIL_LIMIT :]),
+        }
+
+    def _new_state(self):
+        return {
+            "offset": 0,
+            "hits": 0,
+            "aborted": 0,
+            "max_out_len_hits": 0,
+            "wasted_chars": 0,
+            "wasted_ms": 0,
+        }
+
+    def _reset(self):
+        """A rewritten predictions file invalidates offsets and dedupe state."""
+        self._files = {}
+        self._seen = set()
+        self._details = []
+
+    def _read(self, path):
+        key = str(path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        state = self._files.setdefault(key, self._new_state())
+        offset = state["offset"]
+        if size < offset:
+            self._reset()
+            state = self._files.setdefault(key, self._new_state())
+            offset = 0
+        if size == offset:
+            return
+        try:
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                raw = handle.read(size - offset)
+        except OSError:
+            return
+        # Keep a trailing partial record for the next poll.
+        cut = raw.rfind(b"\n")
+        if cut < 0:
+            return
+        state["offset"] = offset + cut + 1
+        for line in raw[: cut + 1].splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            badcase = row.get("online_badcase")
+            if not isinstance(badcase, dict):
+                continue
+            case_id = str(row.get("id"))
+            if case_id in self._seen:
+                continue
+            self._seen.add(case_id)
+            state["hits"] += 1
+            if badcase.get("aborted") is True:
+                state["aborted"] += 1
+            if badcase.get("max_out_len_hit") is True:
+                state["max_out_len_hits"] += 1
+            state["wasted_chars"] += self._wasted_chars(badcase)
+            wasted_ms = badcase.get("wasted_ms")
+            if isinstance(wasted_ms, int) and not isinstance(wasted_ms, bool):
+                state["wasted_ms"] += max(0, wasted_ms)
+            self._details.append(self._detail(case_id, badcase))
+
+    @staticmethod
+    def _wasted_chars(badcase):
+        total = badcase.get("total_chars")
+        detected = badcase.get("detected_at_chars")
+        if (
+            isinstance(total, int)
+            and not isinstance(total, bool)
+            and isinstance(detected, int)
+            and not isinstance(detected, bool)
+        ):
+            return max(0, total - detected)
+        repeat = badcase.get("repeat_chars")
+        return repeat if isinstance(repeat, int) and not isinstance(repeat, bool) else 0
+
+    def _detail(self, case_id, badcase):
+        detail = {"case_id": case_id[:64]}
+        for key in self.DETAIL_FIELDS:
+            value = badcase.get(key)
+            if key in {"aborted", "max_out_len_hit"}:
+                if isinstance(value, bool):
+                    detail[key] = value
+            elif isinstance(value, bool):
+                continue
+            elif isinstance(value, int):
+                detail[key] = value
+            elif isinstance(value, str):
+                detail[key] = value[:64]
+        return detail
+
+
 def execute(folder, spec):
     validate_spec(spec)
     secret_path = folder / "credential.json"
@@ -687,11 +840,22 @@ def execute(folder, spec):
                 [str(compatibility), str(Path(__file__).parent), environment.get("PYTHONPATH", "")]
             )
         )
+        generation_kwargs = config["params"].get("generation_kwargs")
+        observer = (
+            OnlineBadcaseObserver(output, config["params"]["abbr"])
+            if config.get("subcommand") == "llm_accuracy"
+            and isinstance(generation_kwargs, dict)
+            and isinstance(config["params"].get("abbr"), str)
+            and generation_kwargs.get("online_badcase")
+            else None
+        )
         progress = {
             "job_id": folder.name,
             "stage": "tool_running",
             "observed_at": datetime.now(UTC).isoformat(),
         }
+        if observer is not None:
+            progress["online_badcase"] = observer.poll()
         (folder / "progress.json").write_text(json.dumps(progress))
         import time
 
@@ -703,6 +867,14 @@ def execute(folder, spec):
 
             def publish(final=False):
                 value = dict(progress, observed_at=datetime.now(UTC).isoformat())
+                if observer is not None:
+                    try:
+                        value["online_badcase"] = observer.poll()
+                    except (OSError, ValueError, UnicodeError):
+                        value["online_badcase"] = {
+                            "enabled": True,
+                            "collection_error": "online_badcase_observation_failed",
+                        }
                 if contract:
                     try:
                         found = selected(collect(output, contract), contract)

@@ -62,6 +62,7 @@ export function TaskPlanning({ poolRevision, onManagePool }: { poolRevision: num
   const [selection, setSelection] = useState<Record<string, { compilation: string; manifest: string }>>({});
   const [enabled, setEnabled] = useState<string[]>([]);
   const [curve, setCurve] = useState("");
+  const [onlineBadcase, setOnlineBadcase] = useState(false);
   const [requestedParallel, setParallel] = useState(1);
   const [job, setJob] = useState<Job | null>(null);
   const [adviceJob, setAdviceJob] = useState<Job | null>(null);
@@ -131,10 +132,12 @@ export function TaskPlanning({ poolRevision, onManagePool }: { poolRevision: num
     resource_ids: resourceIds,
     throughput_profile_id: curve || null, dataset_concurrency: parallel, recommend: false,
     tasks: enabled.filter(d => datasets.includes(d) && selection[d]?.compilation && selection[d]?.manifest).map(d => ({
-      task_id: d.replaceAll("-", "_"), dataset: d, concurrency: concurrency[d] ?? null, compilation_id: selection[d].compilation, manifest_id: selection[d].manifest,
+      task_id: d.replaceAll("-", "_"), dataset: d, concurrency: concurrency[d] ?? null, compilation_id: selection[d].compilation, manifest_id: selection[d].manifest, online_badcase: onlineBadcase,
     })) };
   const fingerprint = JSON.stringify(payload);
   useEffect(() => { setParallel(v => Math.min(v, maxParallel)); }, [maxParallel]);
+  // Online detection is precision-only; never carry the switch onto Agent datasets.
+  useEffect(() => { if (!enabled.some(d => d === "GPQA" || d === "MMMU-Pro")) setOnlineBadcase(false); }, [enabled]);
   const preflightFingerprint = JSON.stringify({
     target_id: target, resource_id: resource, resource_kind: resourceKind, resource_ids: resourceIds,
     tasks: payload.tasks.map(({ task_id, dataset, compilation_id, manifest_id }) => ({
@@ -202,6 +205,7 @@ export function TaskPlanning({ poolRevision, onManagePool }: { poolRevision: num
   const validLevels = probeLevels.length > 0 && probeLevels.every((n, i) => Number.isInteger(n) && n >= 1 && n <= 64 && (i === 0 || n > probeLevels[i - 1]));
   const requestBudget = 2 * probeLevels.reduce((sum, n) => sum + Math.max(2, n), 0);
   const incomplete = enabled.some(d => !selection[d]?.compilation || !selection[d]?.manifest);
+  const accuracyEnabled = enabled.some(d => d === "GPQA" || d === "MMMU-Pro");
   const ready = !!target && !!resource && payload.tasks.length > 0 && !incomplete;
   const report = job?.state === "completed" ? job.result?.report : undefined;
   const advice = adviceJob?.state === "completed" ? adviceJob.result?.report : undefined;
@@ -418,6 +422,11 @@ export function TaskPlanning({ poolRevision, onManagePool }: { poolRevision: num
           <label>同时执行的样本数<input aria-label={`${t.dataset} case 并发`} type="number" min={1} max={256} disabled={currentConcurrency(t.dataset) <= 1} value={currentConcurrency(t.dataset)} onChange={e => setConcurrency(v => ({ ...v, [t.dataset]: Number(e.target.value) }))} /></label>
         </div><p className="strategy-help">{currentConcurrency(t.dataset) > 1 ? "并行处理多个样本；以此处设置覆盖配置默认并发，仍受资源能力限制。" : "每次处理一个样本，完成后再执行下一个。"}</p>
       </section>)}
+      <section className="strategy-card" aria-label="在线 badcase 检测">
+        <div className="strategy-card-heading"><h3>在线 badcase 检测</h3><span>可选 · 默认关闭</span></div>
+        <label className="inline"><input type="checkbox" aria-label="启用在线 badcase 检测" checked={onlineBadcase} disabled={busy || !accuracyEnabled} onChange={e => setOnlineBadcase(e.target.checked)} />启用在线 badcase 检测</label>
+        <p className="strategy-help">{accuracyEnabled ? "执行中检测模型输出循环/复读并打标，不中断生成、不改变评分口径；命中计数与明细将在任务详情的执行进度和监控中展示。" : "仅精度测评数据集（GPQA、MMMU-Pro）支持在线检测；Agent 数据集请在启用前移除。"}</p>
+      </section>
     </div>
     <details className="planning-throughput"><summary>吞吐曲线与主动探测<span>高级设置 · 可使用已有曲线或发起真实探测</span></summary><div className="probe-content"><h3>主动探测</h3><div className="probe-fields">
       <label>并发档位<input value={levels} onChange={e => { setLevels(e.target.value); setProbeReview(false); }} /></label>

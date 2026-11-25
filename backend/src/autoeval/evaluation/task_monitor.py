@@ -40,10 +40,52 @@ TRIAL_FIELDS = [
 ]
 CASE_FIELDS = {"case_id", "trial_name", "status", "state", "score"}
 EXTENSION_FIELDS = {"dataset", "model", "status", "created_at", "updated_at"}
+ONLINE_BADCASE_COUNTERS = ("hits", "aborted", "max_out_len_hits", "wasted_chars", "wasted_ms")
+ONLINE_BADCASE_DETAIL_FIELDS = (
+    "reason",
+    "period",
+    "detected_at_chars",
+    "total_chars",
+    "repeat_chars",
+    "wasted_ms",
+    "aborted",
+    "max_out_len_hit",
+)
 
 
 def safe_scalar(value):
     return value if value is None or type(value) in {str, int, float, bool} else None
+
+
+def safe_text(value, limit=64):
+    return value[:limit] if isinstance(value, str) else None
+
+
+def safe_online_badcase(value):
+    """Archive bounded online badcase counters; never free-form model text."""
+    if not isinstance(value, dict):
+        return None
+    rows = value.get("details")
+    details = []
+    for row in (rows[:20] if isinstance(rows, list) else []):
+        if not isinstance(row, dict):
+            continue
+        detail = {"case_id": safe_text(row.get("case_id"))}
+        for key in ONLINE_BADCASE_DETAIL_FIELDS:
+            item = row.get(key)
+            if key in {"aborted", "max_out_len_hit"}:
+                detail[key] = item if type(item) is bool else None
+            else:
+                detail[key] = safe_scalar(item)
+        details.append(detail)
+    result = {"enabled": True}
+    for key in ONLINE_BADCASE_COUNTERS:
+        item = value.get(key)
+        result[key] = item if type(item) is int and item >= 0 else None
+    result["details"] = details
+    if value.get("collection_error") == "online_badcase_observation_failed":
+        result["collection_error"] = "online_badcase_observation_failed"
+    return result
 
 
 def safe_cases(value):
@@ -170,6 +212,7 @@ def normalize(task, identity, source, observed_at, *, snapshot_kind="live"):
         "snapshot_kind": snapshot_kind,
         "collection_status": "available",
         "harbor": harbor if source == "harbor_monitor" else None,
+        "online_badcase": safe_online_badcase(task.get("online_badcase")),
         "diagnostics": issues,
         "log_available": bool(task.get("task_log_path")),
         "job_dir_available": bool(task.get("job_dir") or harbor_source.get("job_dir")),
@@ -210,6 +253,8 @@ def safe_task(task):
         if key in task:
             harbor_source[key] = task[key]
     result["harbor"] = safe_harbor(harbor_source)
+    if "online_badcase" in task:
+        result["online_badcase"] = safe_online_badcase(task["online_badcase"])
     if "task_log_path" in task:
         result["task_log_path"] = safe_job_dir(task["task_log_path"])
     if "job_dir" in task:
@@ -253,6 +298,7 @@ async def save_observation(sessions, settings, binding_id, task, source, observe
                 "total_count",
                 "snapshot_kind",
                 "harbor",
+                "online_badcase",
                 "diagnostics",
             ]
         )

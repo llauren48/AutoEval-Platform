@@ -98,6 +98,7 @@ async def publish(sessions, settings, run_id, child_id, progress):
         "progress_description": "Harbor 已写出终态 trial；评分结果独立归档"
         if source == "harbor_result_files"
         else "已完成原生预测记录；评分结果独立归档",
+        "online_badcase": progress.get("online_badcase"),
     }
     await save_observation(
         sessions,

@@ -33,6 +33,8 @@ class ProbeInput(ResourceRef):
 
 class TaskInput(Strict):
     concurrency: int | None = Field(default=None, ge=1, le=256)
+    # Optional per-task switch; the platform never enables detection by default.
+    online_badcase: bool = Field(default=False, strict=True)
     task_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     compilation_id: uuid.UUID
     manifest_id: uuid.UUID
@@ -44,6 +46,8 @@ class TaskInput(Strict):
         # Preserve old request hashes when callers do not supply the new optional setting.
         if self.concurrency is None:
             value.pop("concurrency", None)
+        if not self.online_badcase:
+            value.pop("online_badcase", None)
         return value
 
 

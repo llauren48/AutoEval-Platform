@@ -77,12 +77,26 @@ async def resolve_inputs(session, settings, body):
                 raise HTTPException(422, str(exc)) from exc
         config = compiled["config"]
         params = config["params"]
+        if spec.online_badcase and config["subcommand"] != "llm_accuracy":
+            raise HTTPException(422, "在线 badcase 检测仅支持精度测评数据集")
         if config["subcommand"] == "llm_accuracy":
             if params.get("dump_eval_details") is False:
                 raise HTTPException(
                     422, "Per-case scoring details are required for report evidence"
                 )
             params["dump_eval_details"] = True
+            if spec.online_badcase:
+                generation_kwargs = params.setdefault("generation_kwargs", {})
+                if not isinstance(generation_kwargs, dict):
+                    raise HTTPException(
+                        422, "generation_kwargs 必须是对象才能启用在线 badcase 检测"
+                    )
+                existing = generation_kwargs.get("online_badcase")
+                # Tag only: aborting a streaming request would fail the case and change scoring.
+                generation_kwargs["online_badcase"] = {
+                    **(dict(existing) if isinstance(existing, dict) else {}),
+                    "abort": False,
+                }
         if config["subcommand"] == "llm_accuracy" and len(params.get("datasets", [])) != 1:
             raise HTTPException(422, "Each compilation must select exactly one dataset")
         if (spec.dataset in {"DeepSWE", "AutomationBench"}) != (

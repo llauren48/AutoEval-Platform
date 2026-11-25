@@ -2947,6 +2947,11 @@ export interface components {
         TaskInput: {
             /** Concurrency */
             concurrency?: number | null;
+            /**
+             * Online Badcase
+             * @default false
+             */
+            online_badcase: boolean;
             /** Task Id */
             task_id: string;
             /**
@@ -3001,6 +3006,11 @@ export interface components {
         TaskSelection: {
             /** Concurrency */
             concurrency?: number | null;
+            /**
+             * Online Badcase
+             * @default false
+             */
+            online_badcase: boolean;
             /** Task Id */
             task_id: string;
             /**

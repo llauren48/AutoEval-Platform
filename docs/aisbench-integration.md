@@ -24,3 +24,11 @@
 开发容器目录：/work/tools/aisbench/source（上游ais_bench树）、site-packages（Linux CPython3.12 CPU依赖）、bridge.py、lock.json。运行时设置PYTHONPATH=/work/tools/aisbench/site-packages:/work/tools/aisbench/source。以AE_AISBENCH_NATIVE_TEST=1启用tests/test_aisbench_native_live.py；默认测试跳过此专项，不能将跳过当成原生验证。
 
 生产前需将依赖制成锁定镜像，并核验所有wheel/hash及第三方许可证；当前仅记录解析版本，未承诺生产可复现镜像。原生评分首批通过，不代表数据、推理、正式报告和评分完整性验收已完成。
+生产前需将依赖制成锁定镜像，并核验所有wheel/hash及第三方许可证；当前仅记录解析版本，未承诺生产可复现镜像。原生评分首批通过，不代表数据、推理、正式报告和评分完整性验收已完成。
+
+## 在线 badcase 检测（平台可选）
+
+- 开关位置：发起测评页「执行策略」中的「在线 badcase 检测」，默认关闭；仅当所选数据集包含 GPQA 或 MMMU-Pro 时可勾选，Agent 数据集由后端返回 422 兜底。
+- 生效方式：提交时平台在精度测评任务的 `generation_kwargs` 中写入 `online_badcase = {"abort": false}`，复用 benchmark 已实现的 `OnlineBadcaseDetector`。固定 `abort=false`，命中只打标、不中断生成，评分口径与未开启时一致。
+- 实时数据来源：执行端增量读取 `output/predictions/<模型缩写>/*.jsonl` 中带 `online_badcase` 的原生记录，按样本去重统计命中数、浪费字符/耗时与最近 20 条明细，写入 `progress.json` 并经监控投影到任务详情「执行进度」「监控」。计数来自原生预测记录，与进度条共享内存计数可能存在细微差异；采集失败只标记 `collection_error`，不影响执行与评分。
+- 边界：阈值沿用 benchmark 默认值，平台不暴露配置；命中明细不写入统一结果与报告（未升级适配器固定版本），历史任务不补写该字段。

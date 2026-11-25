@@ -214,6 +214,20 @@ async def evaluation_run_detail(sessions, settings, run_id):
                             "tasks", []
                         )
                     ),
+                    "online_badcase": any(
+                        task.get("online_badcase") is True
+                        or bool(
+                            (
+                                ((task.get("compilation") or {}).get("config") or {})
+                                .get("params", {})
+                                .get("generation_kwargs")
+                                or {}
+                            ).get("online_badcase")
+                        )
+                        for task in (snapshot.canonical_body.get("inputs") or {}).get(
+                            "tasks", []
+                        )
+                    ),
                 }
                 if snapshot
                 else None,

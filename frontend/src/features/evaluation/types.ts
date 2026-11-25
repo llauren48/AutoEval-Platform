@@ -58,6 +58,7 @@ export type RunSnapshot = {
   profile_id?: string;
   max_model_requests?: number;
   execution_origin: string;
+  online_badcase?: boolean;
 };
 
 export type DatasetResult = {
