@@ -144,6 +144,7 @@ def child(folder):
                     from planning_runtime import (
                         attach_harbor_evidence,
                         collect_terminal_harbor_trials,
+                        harbor_details,
                         read_unified_result,
                         restore_accuracy_indices,
                     )
@@ -155,6 +156,8 @@ def child(folder):
                         raise ValueError("Credential unavailable for result validation")
                     output = folder / "output"
                     captured = {}
+                    if harbor and (details := harbor_details(output, credential)):
+                        captured["harbor_details"] = details
                     try:
                         result, size = read_unified_result(output, credential)
                         restore_accuracy_indices(result, spec.get("case_contract"))

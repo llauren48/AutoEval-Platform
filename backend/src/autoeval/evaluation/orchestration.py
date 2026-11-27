@@ -596,7 +596,7 @@ async def archive_terminal_child(
         )
     if state == "succeeded" and collected.get("unified_result") is None:
         raise ValueError("Successful job has no unified result")
-    if collected.get("native_files") or collected.get("harbor_native_trials"):
+    if any(collected.get(key) for key in ("native_files", "harbor_native_trials", "harbor_details")):
         from autoeval.planning.planning_observations import archive_native
 
         await archive_native(sessions, settings, run_id, child, collected, child_secret)

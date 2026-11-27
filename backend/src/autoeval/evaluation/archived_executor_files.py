@@ -21,10 +21,13 @@ def trial_files(trials):
                 yield f"{trial['trial_name']}/{path}", content
 
 
-def archive_directory(files, path, offset):
+def archive_directory(files, path, offset, metadata=None):
     prefix = path + "/" if path else ""
     entries = {}
-    for filename, (content, timestamp) in files.items():
+    for filename, info in (
+        metadata or {k: {"size": len(v.encode()), "mtime": t} for k, (v, t) in files.items()}
+    ).items():
+        timestamp = info["mtime"]
         if not filename.startswith(prefix):
             continue
         name, separator, _ = filename[len(prefix) :].partition("/")
@@ -34,8 +37,9 @@ def archive_directory(files, path, offset):
         entries[name] = {
             "name": name,
             "directory": bool(separator),
-            "size": 0 if separator else len(content.encode()),
+            "size": 0 if separator else info["size"],
             "mtime": timestamp,
+            **({"metadata_only": True} if not separator and info.get("metadata_only") else {}),
         }
     if path and not entries:
         return {"state": "missing_file"}
@@ -55,13 +59,14 @@ async def archived_files(session, settings, run_id, job, path, offset, *, direct
             UnifiedCollection.run_id == run_id, UnifiedCollection.collection_key == collection_key
         )
     )
-    keys = {f"planning-harbor:{job.id}", f"planning-native:{job.id}"}
+    keys = {f"planning-harbor:{job.id}", f"planning-native:{job.id}", f"harbor-details:{job.id}"}
     bundles = await session.scalars(
         select(UnifiedArtifact).where(
             UnifiedArtifact.run_id == run_id, UnifiedArtifact.collection_key.in_(keys)
         )
     )
     files = {}
+    metadata = {}
 
     def add(entries, archived_at):
         for name, content in entries:
@@ -76,7 +81,25 @@ async def archived_files(session, settings, run_id, job, path, offset, *, direct
             bundle = await asyncio.to_thread(read_manifest, settings, row)
             if bundle["child_id"] != str(job.id) or bundle["run_id"] != str(run_id):
                 raise ValueError("Native archive belongs to another job")
-            if row.collection_key == f"planning-native:{job.id}":
+            if row.collection_key == f"harbor-details:{job.id}":
+                for item in bundle["files"]:
+                    name = item["path"]
+                    parts = name.split("/")
+                    if "details" not in parts[:-1] or any(
+                        p in {"", ".", ".."} or chr(92) in p for p in parts
+                    ):
+                        continue
+                    public = isinstance(item.get("content"), str) and all(
+                        permitted(p) for p in parts
+                    )
+                    metadata[name] = {
+                        "size": item["size"],
+                        "mtime": row.created_at.timestamp(),
+                        "metadata_only": not public,
+                    }
+                    if public:
+                        add([(name, item["content"])], row.created_at)
+            elif row.collection_key == f"planning-native:{job.id}":
                 add(((f["path"], f["content"]) for f in bundle["files"]), row.created_at)
             else:
                 add(trial_files(bundle["trials"]), row.created_at)
@@ -88,17 +111,23 @@ async def archived_files(session, settings, run_id, job, path, offset, *, direct
             )
     except (BotoCoreError, ClientError, ValueError, KeyError, TypeError, OSError):
         return {"state": "unavailable"}
+    metadata = {
+        **{k: {"size": len(v.encode()), "mtime": t} for k, (v, t) in files.items()},
+        **metadata,
+    }
     if directory:
-        return archive_directory(files, path, offset) if files else None
+        return archive_directory(files, path, offset, metadata) if metadata else None
     if path:
+        if metadata.get(path, {}).get("metadata_only"):
+            return {"state": "protected", "size": metadata[path]["size"]}
         if path not in files:
             return {"state": "missing_file"}
         raw = files[path][0].encode()
         content = raw[:LIMIT].decode("utf-8", errors="ignore")
         return text_preview(content, 0, len(content.encode()), len(raw))
-    if not files:
+    if not metadata:
         return None
-    names = sorted(files)
+    names = sorted(metadata)
     return {
         "state": "directory",
         "archived": True,
@@ -106,8 +135,7 @@ async def archived_files(session, settings, run_id, job, path, offset, *, direct
             {
                 "name": name,
                 "directory": False,
-                "size": len(files[name][0].encode()),
-                "mtime": files[name][1],
+                **metadata[name],
             }
             for name in names[offset : offset + 100]
         ],

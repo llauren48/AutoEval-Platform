@@ -136,8 +136,8 @@ export function EvaluationRuns({ runId = "", initialTarget = "", allowSubmit = f
   const targetRows = withSelected(targets.rows.filter(eligibleTarget), target);
   const resourceRows = withSelected(resources.rows.filter((row) => resourceKind !== "customer_ssh" || row.native_tool_root), resource);
   const filteredRuns = runs;
-  const activeTab = detailTab === "执行器原始文件" && !debugEnabled ? "运行概览" : detailTab;
-  const detailTabs = ["运行概览", "执行日志", ...(debugEnabled ? ["执行器原始文件"] : []), "监控快照", "配置快照"];
+  const activeTab = detailTab === "测评产物" && !debugEnabled ? "运行概览" : detailTab;
+  const detailTabs = ["运行概览", "执行日志", ...(debugEnabled ? ["测评产物"] : []), "监控快照", "配置快照"];
 
   const frozen = detail?.snapshot?.dataset_configurations?.find(row =>
     row.config?.subcommand === "agentx" || row.config?.subcommand === "llm_perf");
@@ -213,7 +213,7 @@ export function EvaluationRuns({ runId = "", initialTarget = "", allowSubmit = f
               className={activeTab === name ? "active" : ""} onClick={() => setDetailTab(name)}>{name}</button>)}
           </div>
           {detail.execution_unresolved && <p className="notice" role="alert">执行状态待查证，资源占用和已有记录已保留，请勿重复提交。</p>}
-          {activeTab === "配置快照" ? <section data-testid="run-snapshot"><h3>本次配置快照</h3>{performanceTask ? <div className="task-overview-stats">{workload}</div> : <><dl className="detail-properties"><div><dt>执行参数</dt><dd>{detail.snapshot?.parameters ? Object.entries(detail.snapshot.parameters).map(([key, value]) => `${({output:"回答长度", concurrency:"并发数", temperature:"随机性", top_p:"候选范围", scope:"范围"} as Record<string,string>)[key] || key}：${String(value)}`).join("；") : "暂无信息"}</dd></div><div><dt>样本清单</dt><dd>{detail.snapshot?.manifest_id || "暂无信息"}</dd></div><div><dt>工具版本</dt><dd>{String(detail.snapshot?.tool?.revision || "暂无信息")}</dd></div></dl><p className="muted">本次提交时冻结，后续配置修改不会影响历史任务。</p><dl className="detail-properties"><div><dt>模型</dt><dd>{detail.snapshot?.remote_model || "—"}</dd></div><div><dt>样本数</dt><dd>{detail.snapshot?.sample_count ?? "—"}</dd></div><div><dt>配置版本</dt><dd>{detail.snapshot?.config_version_id || "—"}</dd></div></dl></>}<ManagementDrawer title="查看完整快照与校验值"><pre className="snapshot">{JSON.stringify(detail.snapshot, null, 2)}</pre></ManagementDrawer></section> : activeTab === "执行器原始文件" ? (
+          {activeTab === "配置快照" ? <section data-testid="run-snapshot"><h3>本次配置快照</h3>{performanceTask ? <div className="task-overview-stats">{workload}</div> : <><dl className="detail-properties"><div><dt>执行参数</dt><dd>{detail.snapshot?.parameters ? Object.entries(detail.snapshot.parameters).map(([key, value]) => `${({output:"回答长度", concurrency:"并发数", temperature:"随机性", top_p:"候选范围", scope:"范围"} as Record<string,string>)[key] || key}：${String(value)}`).join("；") : "暂无信息"}</dd></div><div><dt>样本清单</dt><dd>{detail.snapshot?.manifest_id || "暂无信息"}</dd></div><div><dt>工具版本</dt><dd>{String(detail.snapshot?.tool?.revision || "暂无信息")}</dd></div></dl><p className="muted">本次提交时冻结，后续配置修改不会影响历史任务。</p><dl className="detail-properties"><div><dt>模型</dt><dd>{detail.snapshot?.remote_model || "—"}</dd></div><div><dt>样本数</dt><dd>{detail.snapshot?.sample_count ?? "—"}</dd></div><div><dt>配置版本</dt><dd>{detail.snapshot?.config_version_id || "—"}</dd></div></dl></>}<ManagementDrawer title="查看完整快照与校验值"><pre className="snapshot">{JSON.stringify(detail.snapshot, null, 2)}</pre></ManagementDrawer></section> : activeTab === "测评产物" ? (
             <ExecutorFiles key={detail.id} runId={detail.id} currentRound={detail.current_round} />
           ) : activeTab === "执行日志" ? (
             <RunLog key={detail.id} runId={detail.id} datasets={[...new Set(detail.datasets?.map(d => d.dataset))]} />
