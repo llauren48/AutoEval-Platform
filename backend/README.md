@@ -93,6 +93,8 @@ API、Worker、Dispatcher 和 Reconciler 命令位于 `autoeval.entrypoints`，�
 
 接口输入输出、ORM 注册与实体外键见[数据契约与实体关系](../docs/backend-data-model.md)。
 
+Harbor 运行中的任务详情通过 `summary.progress` 返回样本进度。`total_count` 来自本次子作业冻结的样本集合，`finish_count` 按已写出终态结果的样本去重，同一样本的多个 trial 只计一次。
+
 测评接口、执行活动和监控实现在 `evaluation/`，规划观测和探测投递在
 `planning/`，Docker 与 SSH 执行器在 `resources/`。计费模型、额度、账本和
 网关实现在 `billing/`，Langfuse 导入与结果标识在 `reporting/`。

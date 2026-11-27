@@ -58,13 +58,14 @@ def harbor_dispatch_contract(task):
     }
 
 
-async def publish(sessions, settings, run_id, child_id, progress):
+async def publish(sessions, settings, run_id, child, progress):
     if not progress or progress.get("source") not in {
         "aisbench_native_predictions",
         "harbor_result_files",
         "aisbench_performance",
     }:
-        return
+        return progress
+    child_id = child.id
     if progress.get("job_id") != str(child_id):
         raise ValueError("Progress belongs to another dataset execution")
     async with sessions() as session:
@@ -92,6 +93,9 @@ async def publish(sessions, settings, run_id, child_id, progress):
             "replay_plan_ready": "AgentX 已写出轨迹回放计划",
         }.get(progress.get("stage"), "原生性能工具运行中")
     elif source == "harbor_result_files":
+        # Older remote specs may lack the Harbor dispatch contract.
+        if progress.get("total_count") is None:
+            progress = {**progress, "total_count": len(child.payload["samples"])}
         description = "Harbor 已写出终态 trial；评分结果独立归档"
     else:
         description = "已完成原生预测记录；评分结果独立归档"
@@ -117,6 +121,7 @@ async def publish(sessions, settings, run_id, child_id, progress):
         progress["observed_at"],
         kind="final" if final else "live",
     )
+    return progress
 
 
 def terminal_prediction_failures(task, result):
