@@ -3,12 +3,14 @@
 import json
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
+from autoeval.evaluation import task_monitor
 from autoeval.planning import planning_observations, planning_transport
 from autoeval.planning.planning_observations import harbor_dispatch_contract
 
@@ -80,3 +82,38 @@ async def test_publish_partial_snapshot(monkeypatch, source, expected):
         summary = await planning_observations.publish(sessions, None, uuid4(), child, progress)
         binding.latest = save.await_args.args[3]
         assert binding.latest["total_count"] == summary.get("total_count") == expected
+
+
+async def test_monitor_prefers_harbor_counts_to_lifecycle_heartbeat(monkeypatch):
+    now = datetime.now(UTC)
+    scanned = now - timedelta(seconds=10)
+    binding = SimpleNamespace(
+        id=uuid4(), run_id=uuid4(), identity={"task_name": "child"}, latest=None
+    )
+    sessions = MagicMock()
+    session = sessions.return_value.__aenter__.return_value
+    session.scalar = AsyncMock(return_value=binding)
+    session.begin = MagicMock()
+    session.add = MagicMock()
+    monkeypatch.setattr(task_monitor, "write_manifest", lambda *args: None)
+    monkeypatch.setattr(task_monitor, "read_manifest", lambda *args: None)
+
+    async def save(source, stamp, done=None, kind="live"):
+        task = {"task_name": "child", "status": "running", "total_count": 5, "finish_count": done}
+        return await task_monitor.save_observation(
+            sessions, None, binding.id, task, source, stamp.isoformat(), kind
+        )
+
+    lifecycle = "executor_lifecycle"
+    harbor = "harbor_result_files"
+    await save(lifecycle, now)
+    first = await save(harbor, scanned, 0)
+    assert first["source"] == harbor and first["finish_count"] == 0
+    # A lifecycle writer that read the binding before the scan may acquire its lock later.
+    assert await save(lifecycle, now) == first
+    current = await save(harbor, scanned + timedelta(seconds=1), 1)
+    assert current["finish_count"] == 1
+    assert await save(harbor, scanned, 0) == current
+    final = await save(harbor, now, 5, "final")
+    assert final["snapshot_kind"] == "final"
+    assert await save(harbor, now + timedelta(seconds=1), 4) == final
