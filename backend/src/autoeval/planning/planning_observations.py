@@ -147,6 +147,12 @@ def terminal_prediction_failures(task, result):
 
 
 async def archive_native(sessions, settings, run_id, child, result, secret):
+    if details := result.get("harbor_details"):
+        if child.payload["compilation"]["config"]["subcommand"] != "harbor_agent":
+            raise ValueError("Unexpected Harbor details")
+        await archive_native_bundle(
+            sessions, settings, run_id, child.id, "harbor-details", {"files": details}, secret
+        )
     trials = result.get("harbor_native_trials")
     if trials:
         if child.payload["compilation"]["config"]["subcommand"] != "harbor_agent":
@@ -183,6 +189,7 @@ async def archive_native_bundle(sessions, settings, run_id, child_id, kind, payl
         raise ValueError("Credential found in native evidence")
     sha = digest(bundle)
     prefix = {
+        "harbor-details": "harbor-details",
         "planning-native": "native-predictions",
         "planning-harbor": "native-harbor-trials",
         "planning-dispatch": "sample-dispatch",

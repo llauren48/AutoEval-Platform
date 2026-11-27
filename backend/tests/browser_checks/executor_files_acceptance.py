@@ -171,8 +171,8 @@ async def verify_task_page(
 
                 await page.route("**/api/autoeval/v1/**", api)
                 await page.goto(os.environ["AE_BROWSER_URL"].rstrip("/") + "/#run/" + rid)
-                await page.get_by_role("button", name="执行器原始文件", exact=True).click()
-                panel = page.get_by_role("region", name="执行器原始文件")
+                await page.get_by_role("button", name="测评产物", exact=True).click()
+                panel = page.get_by_role("region", name="测评产物")
                 selector = panel.get_by_role("combobox")
                 await panel.get_by_role("button", name="output/case.txt", exact=True).wait_for()
                 assert await selector.input_value() == jobs[-1]
