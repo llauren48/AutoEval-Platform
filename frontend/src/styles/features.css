@@ -2246,7 +2246,10 @@ textarea { font: inherit; }
 .executor-file-list thead th { position: sticky; top: 0; z-index: 1; background: #f2f3f8; }
 .executor-file-list th, .executor-file-list td { padding: 6px 10px; text-align: left; }
 .executor-file-list td:first-child { width: 52%; }
-.executor-file-list td:nth-child(2) { white-space: nowrap; }
+.executor-file-list .executor-size { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.executor-file-list .executor-folder th { background: var(--surface-soft, #f7f8fb); overflow-wrap: anywhere; }
+.executor-folder svg { vertical-align: -2px; margin-right: 7px; color: var(--muted); }
+.executor-file-list caption { padding: 6px 10px; text-align: left; color: var(--muted); font-size: 12px; }
 .executor-file-list td button { text-align: left; overflow-wrap: anywhere; white-space: normal; }
 .executor-file-list .selected-file td { background: var(--accent-hover); }
 .executor-file-list .selected-file td:first-child { box-shadow: inset 3px 0 var(--primary); }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, FileCode2, RefreshCw, X } from "lucide-react";
+import { ArrowUp, FileCode2, Folder, RefreshCw, X } from "lucide-react";
 import { apiGet } from "../../shared/api";
 
 import type { components } from "../../shared/types/api";
@@ -16,6 +16,30 @@ const messages: Record<string, string> = {
 };
 
 type FileEntry = Schema["ExecutorEntry"];
+
+const sizeUnits = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+function fileSize(bytes: number) {
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < sizeUnits.length - 1) {
+    value /= 1000;
+    unit++;
+  }
+  return `${Number(value.toFixed(1))} ${sizeUnits[unit]}`;
+}
+
+function groupFiles(entries: FileEntry[], outputs: boolean) {
+  const groups = new Map<string, FileEntry[]>();
+  for (const entry of entries) {
+    const slash = outputs ? entry.name.indexOf("/") : -1;
+    const folder = slash < 0 ? "" : entry.name.slice(0, slash);
+    const files = groups.get(folder);
+    if (files) files.push(entry);
+    else groups.set(folder, [entry]);
+  }
+  return groups;
+}
 
 function useFileResult(base: string, query: string, revision: number) {
   const [result, setResult] = useState<Result>();
@@ -42,7 +66,7 @@ function PreviewContent({ base, path, archived, revision }: { base: string; path
   if (result.state !== "text") return <p role="status">{messages[result.state] || "无法读取文件"}</p>;
   return <>
     <pre ref={preview} tabIndex={0} aria-label="文件内容" className="snapshot executor-file-preview">{result.content}</pre>
-    <p className="executor-preview-range">字节范围 [{result.start}, {result.end})，共 {result.size} B{(result.start !== 0 || result.end !== result.size) && " · 已截断"}</p>
+    <p className="executor-preview-range">字节范围 [{result.start}, {result.end})，共 <span title={`${result.size} B`}>{fileSize(result.size)}</span>{(result.start !== 0 || result.end !== result.size) && " · 已截断"}</p>
   </>;
 }
 
@@ -114,18 +138,26 @@ function Browser({ base }: { base: string }) {
           {!result ? <p role="status">正在读取执行器…</p> : result.state !== "directory" ? <p role="status">{messages[result.state] || "无法读取目录"}</p>
             : !result.entries.length ? <p>尚未生成文件</p> : <table>
               {result.archived && <caption>{outputs ? "当前显示此作业已归档的原始输出文件" : "归档目录 · 仅包含此作业已归档的输出"}</caption>}
-              <thead><tr><th>{outputs ? (result.archived ? "归档文件路径" : "文件路径（相对作业目录）") : "名称"}</th><th>大小</th><th>{result.archived ? "归档时间" : "修改时间"}</th></tr></thead>
-              <tbody>{result.entries.map(entry => <tr key={entry.name} className={selected?.name === entry.name ? "selected-file" : undefined}>
-                <td>{entry.metadata_only ? <span>{entry.name} · 仅元信息</span>
-                  : <button className="link" aria-pressed={entry.directory ? undefined : selected?.name === entry.name}
-                    onClick={event => {
-                      if (entry.directory) navigate([directory, entry.name].filter(Boolean).join("/"));
-                      else { trigger.current = event.currentTarget; select({ ...entry, archived: Boolean(result.archived) }); }
-                    }}>
-                    {entry.name}{entry.directory && "/"}
-                  </button>}</td>
-                <td>{entry.directory ? "—" : entry.size + " B"}</td><td>{new Date(entry.mtime * 1000).toLocaleString()}</td>
-              </tr>)}</tbody>
+              <thead><tr><th scope="col">文件名称</th><th scope="col" className="executor-size">大小</th><th scope="col">{result.archived ? "归档时间" : "修改时间"}</th></tr></thead>
+              {Array.from(groupFiles(result.entries, outputs), ([folder, entries]) => <tbody key={folder}>
+                {folder && <tr className="executor-folder"><th scope="rowgroup" colSpan={3}><Folder size={15} aria-hidden="true" />{folder}</th></tr>}
+                {entries.map(entry => {
+                  const label = folder ? entry.name.slice(folder.length + 1) : entry.name;
+                  return <tr key={entry.name} className={selected?.name === entry.name ? "selected-file" : undefined}>
+                    <td>{entry.metadata_only ? <span title={entry.name}>{label} · 仅元信息</span>
+                      : <button className="link" title={entry.name} aria-label={entry.name + (entry.directory ? "/" : "")}
+                        aria-pressed={entry.directory ? undefined : selected?.name === entry.name}
+                        onClick={event => {
+                          if (entry.directory) navigate([directory, entry.name].filter(Boolean).join("/"));
+                          else { trigger.current = event.currentTarget; select({ ...entry, archived: Boolean(result.archived) }); }
+                        }}>
+                        {label}{entry.directory && "/"}
+                      </button>}</td>
+                    <td className="executor-size" title={entry.directory ? undefined : `${entry.size} B`}>{entry.directory ? "—" : fileSize(entry.size)}</td>
+                    <td>{new Date(entry.mtime * 1000).toLocaleString()}</td>
+                  </tr>;
+                })}
+              </tbody>)}
             </table>}
         </div>
         {result?.state === "directory" && (offset > 0 || result.more) && <div className="executor-pagination">
@@ -142,7 +174,7 @@ function Browser({ base }: { base: string }) {
           <FileCode2 size={18} aria-hidden="true" />
           <div className="executor-preview-title">
             <h4 title={selectedPath}>{selectedPath}</h4>
-            {metadata && <small>{metadata.size} B · {selected.archived ? "归档于" : "修改于"} {new Date(metadata.mtime * 1000).toLocaleString()}</small>}
+            {metadata && <small><span title={`${metadata.size} B`}>{fileSize(metadata.size)}</span> · {selected.archived ? "归档于" : "修改于"} {new Date(metadata.mtime * 1000).toLocaleString()}</small>}
           </div>
           <button className="executor-icon-button" title="刷新预览" aria-label="刷新预览" onClick={() => refreshPreview(v => v + 1)}><RefreshCw size={16} /></button>
           <button className="executor-icon-button" title="关闭预览" aria-label="关闭预览" onClick={closePreview}><X size={18} /></button>
