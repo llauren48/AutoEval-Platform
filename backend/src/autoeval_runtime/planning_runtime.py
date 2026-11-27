@@ -376,7 +376,7 @@ def controlled_failure_reason(spec, exc):
         for value in ("http 400", "http 404", "http 405", "http 415", "http 422", "json")
     ):
         return "probe_protocol_incompatible"
-    if "请求失败" in message:
+    if "璇锋眰澶辫触" in message:
         return "probe_connection_failed"
     return "remote_probe_failed"
 
@@ -442,6 +442,63 @@ def collect_terminal_harbor_trials(output, credential):
         output, {"cases": candidates}, 8 * 1024 * 1024, credential, include_trajectories=False
     )
     return [case["harbor_artifact"] for case in candidates]
+
+
+def harbor_details(output, credential):
+    """Index the native details tree separately from scoring and trajectory evidence."""
+    import stat
+
+    if __package__:
+        from .debug_files import LIMIT, permitted, text_preview
+    else:
+        from debug_files import LIMIT, permitted, text_preview
+
+    if not output.is_dir() or output.is_symlink():
+        return []
+    entries = []
+    budget = 1024 * 1024
+    for directory, dirs, names, parent in os.fwalk(output, follow_symlinks=False):
+        dirs.sort()
+        relative = Path(directory).relative_to(output)
+        if "details" not in relative.parts:
+            continue
+        for name in sorted(names):
+            path = (relative / name).as_posix()
+            if credential and credential in path:
+                continue
+            if any(ord(c) < 32 or c == chr(92) for c in path):
+                continue
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                entry = {"path": path, "size": info.st_size}
+                entries.append(entry)
+                if not (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_nlink == 1
+                    and info.st_size <= min(budget, LIMIT)
+                    and all(permitted(part) for part in (relative / name).parts)
+                ):
+                    continue
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                with os.fdopen(fd, "rb") as stream:
+                    opened = os.fstat(fd)
+                    if not os.path.samestat(info, opened) or opened.st_nlink != 1:
+                        continue
+                    raw = stream.read(LIMIT + 1)
+                if len(raw) != info.st_size or b"\0" in raw:
+                    continue
+                text = raw.decode("utf8")
+                if credential:
+                    text = text.replace(credential, "[REDACTED]")
+                preview = text_preview(text, 0, len(raw), len(raw))
+                if preview["state"] == "text":
+                    cost = len(json.dumps(preview["content"]).encode())
+                    if cost <= budget:
+                        entry["content"] = preview["content"]
+                        budget -= cost
+            except (OSError, UnicodeError):
+                continue
+    return entries
 
 
 def attach_harbor_evidence(output, result, budget, credential=None, *, include_trajectories=True):
@@ -847,11 +904,25 @@ def execute(folder, spec):
             result_diagnostic = None
         return {
             "unified_result": result,
+            **(
+                {"harbor_details": harbor_details(output, key)}
+                if config.get("subcommand") == "harbor_agent"
+                else {}
+            ),
             "native_files": native_files,
             "case_contract": contract,
             "tool_exit_code": completed.returncode,
             "diagnostic": result_diagnostic,
         }
+    except Exception:
+        # A tool can leave completed trials without producing a valid unified result.
+        if spec.get("compilation", {}).get("config", {}).get("subcommand") == "harbor_agent":
+            details = harbor_details(folder / "output", key)
+            if details:
+                with tempfile.NamedTemporaryFile(mode="w", dir=folder, delete=False) as stream:
+                    json.dump({"harbor_details": details}, stream)
+                Path(stream.name).replace(folder / "result.json")
+        raise
     finally:
         secret_path.unlink(missing_ok=True)
         (private / "private-config.json").unlink(missing_ok=True)

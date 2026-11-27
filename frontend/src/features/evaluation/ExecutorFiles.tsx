@@ -203,7 +203,7 @@ export function ExecutorFiles({ runId, currentRound }: { runId: string; currentR
     return () => controller.abort();
   }, [base, currentRound, revision]);
 
-  return <section className="stack executor-files" aria-label="执行器原始文件">
+  return <section className="stack executor-files" aria-label="测评产物">
     <div className="executor-files-toolbar">
       {attempts && attempts.length > 0 && (
         <label>执行作业 <select value={selected} onChange={e => select(e.target.value)}>

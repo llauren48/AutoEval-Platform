@@ -23,7 +23,7 @@ def test_monitor_loading_is_not_reported_as_not_collected(browser_page):
     expect(page.get_by_text("本次运行未采集工具监控。", exact=True)).to_be_visible()
     navigation = page.get_by_role("group", name="任务详情视图")
     expect(navigation.get_by_role("button", name="运行概览")).to_have_attribute("aria-pressed", "true")
-    expect(navigation.get_by_role("button", name="执行器原始文件")).to_have_count(0)
+    expect(navigation.get_by_role("button", name="测评产物")).to_have_count(0)
     navigation.get_by_role("button", name="监控快照").click()
     expect(page.get_by_test_id("monitor-snapshots")).to_be_visible()
     navigation.get_by_role("button", name="执行日志", exact=True).click()
@@ -196,10 +196,10 @@ def test_executor_files_open_directly_from_task_navigation(browser_page):
     open_run(page, url)
     nav = page.get_by_role("group", name="任务详情视图")
     expect(nav.get_by_role("button")).to_have_text(
-        ["运行概览", "执行日志", "执行器原始文件", "监控快照", "配置快照"]
+        ["运行概览", "执行日志", "测评产物", "监控快照", "配置快照"]
     )
-    nav.get_by_role("button", name="执行器原始文件").click()
-    files = page.get_by_role("region", name="执行器原始文件")
+    nav.get_by_role("button", name="测评产物").click()
+    files = page.get_by_role("region", name="测评产物")
     expect(files.get_by_role("rowheader", name="output", exact=True)).to_have_count(1)
     expect(files.get_by_role("button", name="output/case.txt")).to_have_text("case.txt")
     expect(files.get_by_role("cell", name="1.5 MB", exact=True)).to_have_attribute("title", "1500000 B")

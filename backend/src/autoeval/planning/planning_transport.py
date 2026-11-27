@@ -45,6 +45,7 @@ def runtime_files():
     )
     return {
         "planning_runtime.py": RUNTIME.read_bytes(),
+        "debug_files.py": RUNTIME.with_name("debug_files.py").read_bytes(),
         "performance_model.py": RUNTIME.with_name("performance_model.py").read_bytes(),
         "performance_adapter.py": RUNTIME.with_name("performance_adapter.py").read_bytes(),
         "planner-package.json": (
