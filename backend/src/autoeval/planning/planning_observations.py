@@ -278,3 +278,11 @@ async def publish_lifecycle(sessions, settings, run_id, child, state, *, final=F
         datetime.now(UTC).isoformat(),
         kind="final" if final else "live",
     )
+    # Return the native observation with its own timestamp and snapshot kind.
+    # The lifecycle event above can repeat a count collected before the job stopped.
+    done = latest.get("finish_count")
+    if final and native and type(done) is int and 0 <= done <= len(child.payload["samples"]):
+        return {
+            key: latest.get(key)
+            for key in ("source", "observed_at", "snapshot_kind", "finish_count", "total_count")
+        }

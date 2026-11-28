@@ -35,3 +35,15 @@ async def test_every_dataset_can_archive_terminal_state_without_native_counts(mo
     projection=normalize(args[3],{'task_name':str(child.id)},args[4],datetime.now(UTC).isoformat(),snapshot_kind='final')
     assert projection['process_id'] is None and projection['finish_count'] is None
     assert projection['total_count']==2
+
+    # Publishing the terminal lifecycle event must not turn an earlier native count
+    # into a final native observation for the dataset summary.
+    binding.latest = {
+        "source": "harbor_result_files", "snapshot_kind": "live",
+        "observed_at": datetime.now(UTC).isoformat(), "finish_count": 1, "total_count": 2,
+    }
+    observation = await planning_observations.publish_lifecycle(
+        Session, None, uuid.uuid4(), child, "failed", final=True
+    )
+    assert observation == binding.latest
+    assert saved.await_args.kwargs["kind"] == "final"

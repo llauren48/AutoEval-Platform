@@ -33,6 +33,7 @@ from autoeval.evaluation.resume_budget import (
     round_budget_snapshot,
 )
 from autoeval.evaluation.resume_evidence import ConfirmedEvidenceChanged, verify_confirmed_reuse
+from autoeval.evaluation.sample_progress import report_summary, with_terminal_progress
 from autoeval.infrastructure.config import get_settings
 from autoeval.infrastructure.contracts import JobRef
 from autoeval.infrastructure.db import create_database
@@ -300,7 +301,7 @@ async def execute(sessions, settings, run_id, heartbeat=lambda: None, *, round_i
                         "Final progress observation failed run=%s child=%s error_type=%s",
                         run_id, child.id, type(exc).__name__,
                     )
-            await publish_lifecycle(
+            last_progress = await publish_lifecycle(
                 sessions, settings, run_id, child, observation.state, final=True
             )
             try:
@@ -340,6 +341,12 @@ async def execute(sessions, settings, run_id, heartbeat=lambda: None, *, round_i
                     else "native_execution_failed"
                 )
                 summary = {"validity": "failed", "reason": reason}
+            if frozen.get("task_type") != "performance":
+                summary = with_terminal_progress(
+                    summary,
+                    len(child.payload["samples"]),
+                    last_progress or (child.summary or {}).get("progress"),
+                )
             await update_child(
                 sessions, child, state=state, summary=summary, finished_at=datetime.now(UTC)
             )
@@ -787,11 +794,14 @@ async def finish(sessions, settings, run_id, frozen, children, cancelled):
 
     async with sessions() as session, session.begin():
         run = await session.get(EvaluationRun, run_id, with_for_update=True)
+        datasets = [child_view(child) for child in children]
+        for dataset in datasets:
+            dataset["summary"] = report_summary(dataset["summary"])
         result = {
             "schema_version": "planned-report.v1",
             "run_id": str(run_id),
             "estimate": frozen.get("estimate"),
-            "datasets": [child_view(c) for c in children],
+            "datasets": datasets,
             "actual_duration_sec": (
                 max(c.finished_at for c in children if c.finished_at)
                 - min(c.started_at for c in children if c.started_at)
@@ -809,7 +819,7 @@ async def finish(sessions, settings, run_id, frozen, children, cancelled):
         if single_gpqa:
             result.update(
                 snapshot_sha256=digest(frozen),
-                summary=children[0].summary or {},
+                summary=datasets[0]["summary"] or {},
                 validity="complete"
                 if children[0].state == "succeeded"
                 and (children[0].summary or {}).get("scoring_status") == "succeeded"
