@@ -628,6 +628,21 @@ def autocomplete_template(entry):
     return template
 
 
+def image_tool_root(body, settings):
+    if body.execution != "docker" or body.tool_root:
+        return body
+    from autoeval.resources.node_inventory import SharedImage, planning_config
+
+    config = planning_config(settings)
+    candidates = [config.get(str(i), {}) for i in body.resource_ids] if body.resource_ids else [
+        entry for key, entry in config.items() if key != "aisbench_runtime" and "datasets" in entry
+    ]
+    if candidates and all("datasets" in entry for entry in candidates):
+        runtime = SharedImage.model_validate(config["aisbench_runtime"])
+        return body.model_copy(update={"tool_root": runtime.tool_root})
+    return body
+
+
 @router.post("/{input_id}/autocomplete")
 async def autocomplete_input(input_id: uuid.UUID, body: CompileInput, request: Request):
     """Preview only: never persist, probe a host, approve, or start execution."""
@@ -680,6 +695,7 @@ async def autocomplete_input(input_id: uuid.UUID, body: CompileInput, request: R
                     "input_policy": "repository",
                 }
             )
+            candidate = image_tool_root(candidate, request.app.state.settings)
             preview = compile_config(row.payload, candidate, target)
             preview.update(input_readiness(row.payload, preview))
         except ValueError as exc:
@@ -724,6 +740,7 @@ async def compile_input(input_id: uuid.UUID, body: CompileInput, request: Reques
             if set(bound) != set(body.resource_ids):
                 raise HTTPException(422, "Execution resources must be registered SSH bindings")
         try:
+            body = image_tool_root(body, request.app.state.settings)
             result = compile_config(row.payload, body, target)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

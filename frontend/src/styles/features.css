@@ -2117,6 +2117,7 @@ textarea { font: inherit; }
   gap: 12px 16px;
 }
 .ssh-pool-fields .field-wide { grid-column: 1 / -1; }
+.ssh-binding-detail { margin-top: 8px; overflow-wrap: anywhere; }
 .ssh-pool td small { display: block; color: var(--muted); }
 .resource-selected { margin-top: 8px; flex-wrap: wrap; }
 .resource-selected button { display: inline-flex; align-items: center; gap: 6px; }

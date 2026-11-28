@@ -17,6 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from autoeval.infrastructure.contracts import JobObservation, JobRef
 
 
+class DockerBindSourceMissing(RuntimeError):
+    """The daemon rejected a bind mount while creating a container."""
+
+
 class SSHConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     host: str = Field(pattern=r"^[a-zA-Z0-9_.:-]{1,253}$")
@@ -109,6 +113,8 @@ class SSHExecutor:
         raw = stdout.read(1024 * 1024 + 1)
         error = stderr.read(65537)
         code = stdout.channel.recv_exit_status()
+        if code != 0 and argv[:2] == ["docker", "create"] and b"bind source path does not exist" in error.lower():
+            raise DockerBindSourceMissing("Docker bind source directory is missing")
         if code != 0 or len(raw) > 1024 * 1024 or len(error) > 65536:
             raise RuntimeError("Remote operation failed; inspect owned job evidence")
         return raw

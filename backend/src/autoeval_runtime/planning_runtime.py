@@ -86,7 +86,7 @@ def check_tool_environment(config):
         return result.returncode == 0
 
 
-def check_task_selection(config):
+def check_task_selection(config, mount_targets=()):
     params = config["params"]
     selection = {
         key: params[key]
@@ -99,17 +99,87 @@ def check_task_selection(config):
         "from harbor.models.job.config import DatasetConfig; "
         "d=json.loads(sys.argv[1]);d['path']=Path(d['path']); "
         "tasks=asyncio.run(DatasetConfig(**d).get_task_configs(disable_verification=False)); "
-        "assert tasks, 'No tasks selected'"
+        "assert tasks, 'No tasks selected'; "
+        "roots=[Path(p).resolve(strict=True) for p in json.loads(sys.argv[2])]; "
+        "assert not roots or all(any(Path(t.path).resolve(strict=True).is_relative_to(r) "
+        "for r in roots) for t in tasks), 'Task outside registered mounts'"
     )
     return (
         subprocess.run(
-            [params.get("python_executable") or sys.executable, "-c", code, json.dumps(selection)],
+            [params.get("python_executable") or sys.executable, "-c", code,
+             json.dumps(selection), json.dumps(mount_targets)],
             capture_output=True,
             check=False,
             timeout=5,
         ).returncode
         == 0
     )
+
+
+def check_accuracy_mounts(params, targets):
+    """Read the data file selected by the locked AISBench config inside a declared mount."""
+    from autoeval_adaptor.discovery import resolve_dataset
+    from autoeval_adaptor.errors import DiscoveryError
+
+    root = Path(params["ais_bench_root"])
+    try:
+        refs = [resolve_dataset(root, name) for name in params["datasets"]]
+    except DiscoveryError:
+        return False
+    code = r"""
+import csv, importlib, itertools, json, pathlib, re, sys
+root, refs, mounts, selection = json.loads(sys.argv[1])
+sys.path.insert(0, root)
+from ais_bench.benchmark.datasets.utils.datasets import get_data_path
+last = re.fullmatch(r"\[\d+:(\d+)\]", selection or "")
+required = int(last.group(1)) if last else 1
+csv.field_size_limit(2**31 - 1)
+for module, variable in refs:
+    rows = getattr(importlib.import_module(module), variable)
+    if not rows:
+        sys.exit(1)
+    for row in rows:
+        path = pathlib.Path(get_data_path(row["path"]))
+        if path.is_dir() and row.get("name"):
+            path = path / row["name"]
+        path = path.resolve(strict=True)
+        if not any(path.is_relative_to(pathlib.Path(m).resolve()) for m in mounts):
+            sys.exit(1)
+        with path.open(encoding="utf-8-sig", newline="") as source:
+            records = csv.reader(source, delimiter="\t" if path.suffix.lower() == ".tsv" else ",")
+            next(records, None)
+            if sum(1 for _ in itertools.islice(records, required)) != required:
+                sys.exit(1)
+"""
+    inputs = [str(root), [(ref.module, ref.variable) for ref in refs], targets,
+              params.get("dataset_test_range")]
+    return subprocess.run(
+        [params.get("python_executable") or sys.executable, "-c", code, json.dumps(inputs)],
+        capture_output=True, check=False, timeout=40,
+    ).returncode == 0
+
+
+def harbor_revision_matches(params, expected):
+    # Resolve the module using the interpreter actually selected for the Agent task.
+    script = """
+import importlib.metadata as md, json, pathlib, subprocess, sys
+import harbor
+module = pathlib.Path(harbor.__file__).resolve()
+checkout = next((p for p in module.parents if (p / ".git").exists()), None)
+git = ["git", "-c", "safe.directory=" + str(checkout), "-C", str(checkout)]
+if checkout and subprocess.run(git + ["ls-files", "--error-unmatch", str(module.relative_to(checkout))],
+                               capture_output=True).returncode == 0:
+    actual = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
+else:
+    package = md.distribution("harbor")
+    assert module.parent == pathlib.Path(package.locate_file("harbor")).resolve()
+    actual = json.loads(package.read_text("direct_url.json") or "{}").get("vcs_info", {}).get("commit_id")
+sys.exit(0 if actual == sys.argv[1] else 1)
+"""
+    return subprocess.run(
+        [params.get("python_executable") or sys.executable, "-c", script, expected],
+        capture_output=True, timeout=10, check=False,
+    ).returncode == 0
 
 
 def inspect_dataset(task, *, networks, validated):
@@ -147,11 +217,19 @@ def inspect_dataset(task, *, networks, validated):
     except (KeyError, OSError, ValueError, subprocess.SubprocessError):
         tool_revision = None
         reasons.append("tool_identity_mismatch")
+    if not reasons and task.get("accuracy_mounts"):
+        try:
+            if not check_accuracy_mounts(params, task["accuracy_mounts"]):
+                reasons.append("dataset_mount_content_mismatch")
+        except (ImportError, OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            reasons.append("dataset_mount_content_mismatch")
     if not reasons and config.get("subcommand") == "harbor_agent":
         try:
-            if not check_tool_environment(config):
+            if task.get("harbor_revision") and not harbor_revision_matches(params, task["harbor_revision"]):
+                reasons.append("harbor_revision_mismatch")
+            elif not check_tool_environment(config):
                 reasons.append("tool_environment_preflight_failed")
-            elif not check_task_selection(config):
+            elif not check_task_selection(config, task.get("harbor_mounts", ())):
                 reasons.append("task_selection_preflight_failed")
         except (OSError, ValueError, subprocess.SubprocessError):
             reasons.append("tool_environment_preflight_unavailable")

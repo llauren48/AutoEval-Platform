@@ -3,7 +3,7 @@ import { groupSshHosts } from "../planning/sshHosts";
 import type { Resource } from "../evaluation/types";
 import "./StandardInputDrawers.css";
 import { AdapterFields } from "./AdapterFields";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiGet, apiGetOptions, apiGetPage, apiPost } from "../../shared/api";
 import { ManagementDrawer } from "../../shared/ui/ManagementDrawer";
 import { OffsetPagination } from "../../shared/ui/OffsetPagination";
@@ -61,20 +61,21 @@ type SavedEnvironment = {
 };
 
 function CompileForm({ entry }: { entry: InputVersion }) {
+  const agentDataset = ["DeepSWE", "AutomationBench"].includes(entry.benchmark);
   const [models, setModels] = useState<Model[]>([]);
   const [targets, setTargets] = useState<Target[]>([]);
   const [modelId, setModelId] = useState("");
   const [targetId, setTargetId] = useState("");
-  const [template, setTemplate] = useState(JSON.stringify({ tool: "ais_bench", subcommand: entry.benchmark === "DeepSWE" ? "harbor_agent" : "llm_accuracy", params: {} }, null, 2));
-  const [adjustments, setAdjustments] = useState(JSON.stringify({ tool: "ais_bench", subcommand: entry.benchmark === "DeepSWE" ? "harbor_agent" : "llm_accuracy", params: {} }, null, 2));
+  const [template, setTemplate] = useState(JSON.stringify({ tool: "ais_bench", subcommand: agentDataset ? "harbor_agent" : "llm_accuracy", params: {} }, null, 2));
+  const [adjustments, setAdjustments] = useState(JSON.stringify({ tool: "ais_bench", subcommand: agentDataset ? "harbor_agent" : "llm_accuracy", params: {} }, null, 2));
   const [version, setVersion] = useState("platform.v1");
   function standardPath(key: string) {
     const value = entry.locked_fields?.[`params.${key}`];
     return typeof value === "string" && value.startsWith("/") ? value : "";
   }
   const [execution, setExecution] = useState(entry.locked_fields?.["params.execution"] === "local" ? "local" : "docker");
-  const [datasetsDir, setDatasetsDir] = useState(() => standardPath("datasets_dir"));
-  const [taskPath, setTaskPath] = useState(() => standardPath("path"));
+  const [editedDatasetsDir, setDatasetsDir] = useState<string | null>(null);
+  const [editedTaskPath, setTaskPath] = useState<string | null>(null);
   const [toolRoot, setToolRoot] = useState<string | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
   const [resourceIds, setResourceIds] = useState<string[]>([]);
@@ -83,7 +84,7 @@ function CompileForm({ entry }: { entry: InputVersion }) {
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    apiGetOptions<Resource[]>("/ssh-resources", signal).then(page => {
+    apiGetOptions<Resource[]>("/ssh-resources?nodes=true", signal).then(page => {
       if (!signal.aborted) setResources(page.data);
     }).catch(() => { if (!signal.aborted) setResourceError("SSH 资源列表读取失败"); });
     async function loadPaths() {
@@ -101,33 +102,48 @@ function CompileForm({ entry }: { entry: InputVersion }) {
   }, []);
   const [editedPaths, setEditedPaths] = useState<Record<string, string>>({});
   const lockedRoot = standardPath("ais_bench_root");
-  const directories = resourceIds.map(id => {
-    const matches = new Set<string>();
+  const sharedImage = execution === "docker" ? resources.find(row => row.shared_image)?.shared_image : undefined;
+  const dataset = entry.mapping?.dataset || (entry.benchmark === "GPQA_Diamond" ? "GPQA" : entry.benchmark);
+  const mountTargets = new Set(resources.flatMap(row =>
+    row.shared_image && sharedImage ? (row.datasets?.[dataset]?.mounts || []).map(mount => mount.target) : []));
+  const registeredTarget = mountTargets.size === 1 ? [...mountTargets][0] : "";
+  const datasetsDir = (sharedImage && standardPath("datasets_dir")) ||
+    (editedDatasetsDir ?? (standardPath("datasets_dir") || (agentDataset ? "" : registeredTarget)));
+  const taskPath = (sharedImage && standardPath("path")) ||
+    (editedTaskPath ?? (standardPath("path") || (agentDataset ? registeredTarget : "")));
+  const boundIds = sharedImage ? [] : resourceIds;
+  const hosts = groupSshHosts(resources);
+  const directories = hosts.filter(host => host.resources.some(row => boundIds.includes(row.id))).map(host => {
+    const selectedIds = host.resources.map(row => row.id).filter(id => boundIds.includes(id));
+    const roots = new Map(selectedIds.map(id => [id, new Set<string>()]));
     for (const row of saved) {
       const runtime = row.runtime_config;
-      if (!row.input_ready || row.config.subcommand !== (entry.benchmark === "DeepSWE" ? "harbor_agent" : "llm_accuracy")
-          || !Array.isArray(runtime?.resource_ids) || !runtime.resource_ids.includes(id)) continue;
+      if (!row.input_ready || row.config.subcommand !== (agentDataset ? "harbor_agent" : "llm_accuracy")
+          || !Array.isArray(runtime?.resource_ids)) continue;
       const params = { ...row.config.params, ...runtime };
       if (params.execution === execution && typeof params.ais_bench_root === "string" && params.ais_bench_root.startsWith("/")) {
-        matches.add(params.ais_bench_root);
+        for (const id of runtime.resource_ids) roots.get(id)?.add(params.ais_bench_root);
       }
     }
-    const candidates = [...matches].sort();
     // The platform R13 AISBench and Harbor images both ship the checkout at /benchmark.
-    const useImageDefault = execution === "docker" && candidates.length === 0;
-    const inferred = candidates.length === 1 ? candidates[0] : useImageDefault ? "/benchmark" : "";
-    const key = execution + "/" + id;
+    const histories = [...roots.values()];
+    const useImageDefault = execution === "docker" && histories.every(paths => !paths.size);
+    const candidates = [...new Set(histories.flatMap(paths =>
+      paths.size ? [...paths] : execution === "docker" ? ["/benchmark"] : []))].sort();
+    const allHavePath = execution === "docker" || histories.every(paths => paths.size);
+    const inferred = allHavePath && candidates.length === 1 ? candidates[0] : "";
+    const key = execution + "/" + selectedIds.slice().sort().join(",");
     const value = lockedRoot || (editedPaths[key] ?? inferred);
-    const resource = resources.find(row => row.id === id);
     const status = lockedRoot ? "标准锁定" : !value ? (candidates.length > 1 ? "待确认" : "待填写")
       : editedPaths[key] !== undefined ? "手动填写" : useImageDefault ? "R13 镜像默认" : "历史配置";
-    return { id, key, name: resource?.binding_key || id, value, candidates, status };
+    return { id: selectedIds[0], key, name: host.label, value, candidates, status };
   });
   const firstRoot = directories[0]?.value.trim() || "";
   const samePath = directories.every(row => row.value.trim() === firstRoot);
-  const effectiveRoot = directories.length ? (samePath ? firstRoot : "") : lockedRoot || toolRoot || "";
+  const effectiveRoot = directories.length ? (samePath ? firstRoot : "") : lockedRoot || sharedImage?.tool_root || toolRoot || "";
   const missingPath = directories.some(row => !row.value.trim());
-  const pathIssue = directories.length < 2 ? "" : missingPath ? "请补齐所选资源的源码目录。"
+  const pathIssue = sharedImage && lockedRoot && lockedRoot !== sharedImage.tool_root
+    ? "标准锁定源码目录与统一镜像不一致，请核对配置。" : boundIds.length < 2 ? "" : missingPath ? "请确认所选执行配置共用的源码目录。"
     : !samePath ? "当前快照仅支持一个源码目录，请将不同目录的资源分别保存为执行配置。" : "";
   const [result, setResult] = useState<Compilation | null>(null);
   const [suggestion, setSuggestion] = useState<{ preview: Compilation; template_source: string; notes: string[]; changes: unknown } | null>(null);
@@ -151,13 +167,17 @@ function CompileForm({ entry }: { entry: InputVersion }) {
     return () => controller.abort();
   }, [entry.id, entry.source_model]);
   const changed = () => { setResult(null); setSuggestion(null); setMessage(""); };
+  const feedback = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (message || result) feedback.current?.scrollIntoView({ block: "nearest" });
+  }, [message, result]);
   const autocomplete = async () => {
     setBusy(true); setMessage(""); setResult(null); setSuggestion(null);
     try {
       const response = await apiPost<{ candidate: { model_id: string | null; target_id: string | null; template: unknown; template_version: string }; preview: Compilation; template_source: string; notes: string[] }>(`/standard-inputs/${entry.id}/autocomplete`, {
         model_id: modelId || null, target_id: targetId || null, execution,
         adjustments: JSON.parse(adjustments), datasets_dir: datasetsDir || null,
-        task_path: taskPath || null, tool_root: effectiveRoot || null, resource_ids: resourceIds,
+        task_path: taskPath || null, tool_root: effectiveRoot || null, resource_ids: boundIds,
       });
       setSuggestion({ ...response, changes: { before: JSON.parse(template), after: response.candidate.template } });
       setTemplate(JSON.stringify(response.candidate.template, null, 2));
@@ -172,64 +192,76 @@ function CompileForm({ entry }: { entry: InputVersion }) {
       setResult(await apiPost<Compilation>(`/standard-inputs/${entry.id}/compile`, {
         input_policy: "repository", model_id: modelId || null, target_id: targetId || null, template_version: version,
         template: JSON.parse(template), adjustments: JSON.parse(adjustments), execution,
-        datasets_dir: datasetsDir || null, task_path: taskPath || null, tool_root: effectiveRoot || null, resource_ids: resourceIds,
+        datasets_dir: datasetsDir || null, task_path: taskPath || null, tool_root: effectiveRoot || null, resource_ids: boundIds,
       }));
     } catch (error) { setMessage(error instanceof Error ? error.message : "输入编译失败"); }
     finally { setBusy(false); }
   };
   return <div className="input-editor">
-    <header className="input-context"><div><strong>{entry.source_model}</strong><small>{entry.benchmark}</small></div>
-      <button disabled={busy} onClick={() => void autocomplete()}>从标准仓读取配置</button></header>
-    {suggestion && <section className="notice stack" aria-label="自动补全预览"><h3>标准仓配置预览，待确认保存</h3><p>来源：{suggestion.template_source}</p>{suggestion.notes.filter(note => !/审批|批准/.test(note)).map(note => <small key={note}>{note}</small>)}<p>{suggestion.preview.input_ready ? "输入字段齐备" : "仍需补全：" + suggestion.preview.blocking_reasons.join("、")}</p><details><summary>补全差异与字段来源</summary><pre className="snapshot">{JSON.stringify({ changes: suggestion.changes, field_sources: suggestion.preview.field_sources, overrides: suggestion.preview.overrides }, null, 2)}</pre></details></section>}
-    <section className="input-fields"><h3>模型映射</h3><label>平台模型<select aria-label="平台模型" value={modelId} onChange={(e) => { setModelId(e.target.value); setTargetId(uniqueService(e.target.value, targets)); changed(); }}><option value="">请选择模型映射</option>{models.map((m) => <option key={m.id} value={m.id}>{m.model_id} · {m.name}</option>)}</select></label>
-    <label>模型服务<select aria-label="模型服务" value={targetId} disabled={busy} onChange={e => {
-      const service = targets.find(t => t.id === e.target.value);
-      setTargetId(service?.id || "");
-      if (service) setModelId(service.model_id);
-      changed();
-    }}>
-      <option value="">{targets.length ? "请选择已登记服务" : "暂无可选服务"}</option>
-      {[true, false].map(matching => {
-        const group = targets.filter(t => (t.model_id === modelId) === matching);
-        return group.length > 0 && <optgroup key={String(matching)}
-          label={matching ? "当前平台模型" : modelId ? "其他平台模型（选择后切换模型）" : "已登记服务"}>
-          {group.map(t => <option key={t.id} value={t.id}>
-            {t.remote_model} · {models.find(m => m.id === t.model_id)?.model_id || t.model_id} · {t.base_url}
-          </option>)}
-        </optgroup>;
-      })}
-    </select></label>
-</section><section className="input-fields"><h3>执行环境</h3><div style={{gridColumn: "1 / -1"}}><strong>绑定 SSH 资源</strong>
-      <ResourceMultiSelect hosts={groupSshHosts(resources)} value={resourceIds} showChips onChange={ids => {
-        setResourceIds(ids); setToolRoot(null); changed();
-      }} />
-      {resourceError && <small role="status">{resourceError}</small>}
-    </div><label>运行方式<select value={execution} onChange={(e) => { setExecution(e.target.value); setToolRoot(null); changed(); }}><option value="docker">Docker</option><option value="local">执行服务器本机</option></select></label>
-    {!directories.length && <label>AISBench 源码目录<input aria-label="AISBench 源码目录" value={effectiveRoot} readOnly={!!lockedRoot} onChange={(e) => { setToolRoot(e.target.value); changed(); }} placeholder="执行环境中的绝对路径" /></label>}
-    {entry.benchmark !== "DeepSWE" ? <label>数据集目录<input aria-label="数据集目录" value={datasetsDir} onChange={(e) => { setDatasetsDir(e.target.value); changed(); }} /></label> : <label>任务目录<input value={taskPath} onChange={(e) => { setTaskPath(e.target.value); changed(); }} placeholder="需与标准锁定路径一致" /></label>}
-    {directories.length > 0 && <section className="ssh-directories" aria-label="所选资源的 AISBench 源码目录">
-      <header><h4>AISBench 源码目录</h4><span>{directories.length} 个资源</span></header>
-      {directories.map(row => <div className="ssh-directory-row" key={row.id}>
-        <div className="ssh-directory-label"><label htmlFor={`ssh-path-${row.id}`}>{row.name}</label>
-          <small className={!row.value ? "needs-path" : undefined}>{row.status}</small></div>
-        <input id={`ssh-path-${row.id}`} value={row.value} readOnly={!!lockedRoot}
-          list={row.candidates.length > 1 ? `paths-${row.id}` : undefined}
-          placeholder={row.candidates.length > 1 ? "选择已有目录或填写绝对路径" : "填写该资源的绝对路径"}
-          onChange={event => { setEditedPaths(previous => ({...previous, [row.key]: event.target.value})); changed(); }} />
-        {row.candidates.length > 1 && <datalist id={`paths-${row.id}`}>{row.candidates.map(path => <option key={path} value={path} />)}</datalist>}
-      </div>)}
-      {directories.some(row => row.status === "R13 镜像默认") && <small>默认目录来自平台 R13 镜像。自定义镜像可逐行修改，实际可用性以环境预检为准。</small>}
-      {pathIssue && <p role="status">{pathIssue}</p>}
-    </section>}
-    </section>
-    <details><summary>高级兼容参数（历史接口）</summary><label>启动模板版本<input aria-label="启动模板版本" value={version} onChange={(e) => { setVersion(e.target.value); changed(); }} /></label>
-    <label>启动模板 JSON<textarea aria-label="启动模板 JSON" rows={6} value={template} onChange={(e) => { setTemplate(e.target.value); changed(); }} /></label>
-    <label>允许调整的参数 JSON<textarea rows={4} value={adjustments} onChange={(e) => { setAdjustments(e.target.value); changed(); }} /></label>
-    <small>使用 tool/subcommand/params 结构；标准锁定参数最终覆盖，环境、端点及命令行绕过参数不可在此填写。模板内容修改需使用新版本。{entry.startup_missing ? "仓库缺少 benchmark_config.json，需在标准仓补齐后同步新版本；平台不自动补造测评参数。" : ""}</small>
-    </details>
-    <footer><small>保存配置快照后，可返回控制台选择该配置。</small><button className="primary" disabled={busy || !!pathIssue} onClick={() => void compile()}>{busy ? "校验中…" : "校验并保存输入快照"}</button></footer>
-    {message && <p role="alert">{message}</p>}
-    {result && <section className="stack" aria-label="输入校验结果"><h3>{result.input_ready ? "输入字段校验通过" : "输入待补全"}</h3>{result.blocking_reasons.length > 0 && <ul>{result.blocking_reasons.map((reason) => <li key={reason}>{missingLabel(reason)}</li>)}</ul>}<small>配置 SHA-256：{result.sha256}</small><details open><summary>脱敏启动配置</summary><pre className="snapshot">{JSON.stringify(result.config, null, 2)}</pre></details><details><summary>锁定字段、来源及覆盖差异</summary><pre className="snapshot">{JSON.stringify({ locked_fields: result.locked_fields, field_sources: result.field_sources, overrides: result.overrides }, null, 2)}</pre></details></section>}
+    <div className="input-editor-body">
+      <header className="input-context"><div><strong>{entry.source_model}</strong><small>{entry.benchmark}</small></div>
+        <button disabled={busy} onClick={() => void autocomplete()}>从标准仓读取配置</button></header>
+      {suggestion && <section className="notice stack" aria-label="自动补全预览"><h3>标准仓配置预览，待确认保存</h3><p>来源：{suggestion.template_source}</p>{suggestion.notes.filter(note => !/审批|批准/.test(note)).map(note => <small key={note}>{note}</small>)}<p>{suggestion.preview.input_ready ? "输入字段齐备" : "仍需补全：" + suggestion.preview.blocking_reasons.join("、")}</p><details><summary>补全差异与字段来源</summary><pre className="snapshot">{JSON.stringify({ changes: suggestion.changes, field_sources: suggestion.preview.field_sources, overrides: suggestion.preview.overrides }, null, 2)}</pre></details></section>}
+      <section className="input-fields"><h3>模型映射</h3><label>平台模型<select aria-label="平台模型" value={modelId} onChange={(e) => { setModelId(e.target.value); setTargetId(uniqueService(e.target.value, targets)); changed(); }}><option value="">请选择模型映射</option>{models.map((m) => <option key={m.id} value={m.id}>{m.model_id} · {m.name}</option>)}</select></label>
+      <label>模型服务<select aria-label="模型服务" value={targetId} disabled={busy} onChange={e => {
+        const service = targets.find(t => t.id === e.target.value);
+        setTargetId(service?.id || "");
+        if (service) setModelId(service.model_id);
+        changed();
+      }}>
+        <option value="">{targets.length ? "请选择已登记服务" : "暂无可选服务"}</option>
+        {[true, false].map(matching => {
+          const group = targets.filter(t => (t.model_id === modelId) === matching);
+          return group.length > 0 && <optgroup key={String(matching)}
+            label={matching ? "当前平台模型" : modelId ? "其他平台模型（选择后切换模型）" : "已登记服务"}>
+            {group.map(t => <option key={t.id} value={t.id}>
+              {t.remote_model} · {models.find(m => m.id === t.model_id)?.model_id || t.model_id} · {t.base_url}
+            </option>)}
+          </optgroup>;
+        })}
+      </select></label>
+      </section>
+      <section className="input-fields"><h3>执行环境</h3>
+        {!sharedImage && <div className="input-resource-picker">
+        <ResourceMultiSelect hosts={hosts} value={resourceIds} showChips allowBindingSelection onChange={ids => {
+          setResourceIds(ids); setToolRoot(null); changed();
+        }} />
+        {resourceError && <small role="status">{resourceError}</small>}
+      </div>}<label>运行方式<select value={execution} onChange={(e) => { setExecution(e.target.value); setToolRoot(null); changed(); }}><option value="docker">Docker</option><option value="local">执行服务器本机</option></select></label>
+      {!directories.length && <label>AISBench 源码目录<input aria-label="AISBench 源码目录" value={effectiveRoot} readOnly={!!lockedRoot || !!sharedImage} onChange={(e) => { setToolRoot(e.target.value); changed(); }} placeholder="执行环境中的绝对路径" /></label>}
+      {!agentDataset ? <label>数据集目录<input aria-label="数据集目录" readOnly={!!sharedImage && !!standardPath("datasets_dir")} value={datasetsDir} onChange={(e) => { setDatasetsDir(e.target.value); changed(); }} /></label> : <label>任务目录<input readOnly={!!sharedImage && !!standardPath("path")} value={taskPath} onChange={(e) => { setTaskPath(e.target.value); changed(); }} placeholder="需与标准锁定路径一致" /></label>}
+      {pathIssue && sharedImage && <small role="alert">{pathIssue}</small>}
+      {directories.length > 0 && <section className="ssh-directories" aria-label="所选资源的 AISBench 源码目录">
+        <header><h4>AISBench 源码目录</h4><span>{directories.length} 台主机</span></header>
+        {directories.map(row => <div className="ssh-directory-row" key={row.id}>
+          <div className="ssh-directory-label"><label htmlFor={`ssh-path-${row.id}`}>{row.name}</label>
+            <small className={!row.value ? "needs-path" : undefined}>{row.status}</small></div>
+          <input id={`ssh-path-${row.id}`} value={row.value} readOnly={!!lockedRoot}
+            list={row.candidates.length > 1 ? `paths-${row.id}` : undefined}
+            placeholder={row.candidates.length > 1 ? "选择已有目录或填写绝对路径" : "填写该资源的绝对路径"}
+            onChange={event => { setEditedPaths(previous => ({...previous, [row.key]: event.target.value})); changed(); }} />
+          {row.candidates.length > 1 && <datalist id={`paths-${row.id}`}>{row.candidates.map(path => <option key={path} value={path} />)}</datalist>}
+        </div>)}
+        {directories.some(row => row.status === "R13 镜像默认") && <small>默认目录来自平台 R13 镜像。自定义镜像可逐行修改，实际可用性以环境预检为准。</small>}
+        {pathIssue && <p role="status">{pathIssue}</p>}
+      </section>}
+      </section>
+      <details className="input-advanced">
+        <summary>高级兼容参数（历史接口）</summary>
+        <div className="input-advanced-fields">
+          <label>启动模板版本<input aria-label="启动模板版本" value={version} onChange={e => { setVersion(e.target.value); changed(); }} /></label>
+          <label>启动模板 JSON<textarea aria-label="启动模板 JSON" spellCheck={false} rows={6} value={template} onChange={e => { setTemplate(e.target.value); changed(); }} /></label>
+          <label>允许调整的参数 JSON<textarea aria-label="允许调整的参数 JSON" spellCheck={false} rows={6} value={adjustments} onChange={e => { setAdjustments(e.target.value); changed(); }} /></label>
+          <small>两个 JSON 均使用 tool/subcommand/params 结构。标准锁定参数优先。请勿填写环境、端点或命令行绕过参数。修改模板内容时请使用新版本。</small>
+          {entry.startup_missing && <small>标准仓缺少 benchmark_config.json。请在标准仓补齐后同步新版本。</small>}
+        </div>
+      </details>
+      <div ref={feedback} className="input-feedback" aria-live="polite">
+      {message && <p role="alert">{message}</p>}
+      {result && <section className="stack" aria-label="输入校验结果"><h3>{result.input_ready ? "输入字段校验通过" : "输入待补全"}</h3>{result.blocking_reasons.length > 0 && <ul>{result.blocking_reasons.map((reason) => <li key={reason}>{missingLabel(reason)}</li>)}</ul>}<small>配置 SHA-256：{result.sha256}</small><details open><summary>脱敏启动配置</summary><pre className="snapshot">{JSON.stringify(result.config, null, 2)}</pre></details><details><summary>锁定字段、来源及覆盖差异</summary><pre className="snapshot">{JSON.stringify({ locked_fields: result.locked_fields, field_sources: result.field_sources, overrides: result.overrides }, null, 2)}</pre></details></section>}
+      </div>
+    </div>
+    <footer><small>保存后可在控制台选择此配置。</small><button className="primary" disabled={busy || !!pathIssue} onClick={() => void compile()}>{busy ? "校验中…" : "校验并保存输入快照"}</button></footer>
   </div>;
 }
 

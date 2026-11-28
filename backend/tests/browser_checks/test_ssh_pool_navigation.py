@@ -7,6 +7,147 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 
+def test_legacy_host_has_one_row_and_one_choice(browser_page):
+    page, url, _ = browser_page
+    login = "tester@worker.test:22"
+    bindings = ["accuracy-old", "agent-old", "shared-old"]
+    base = {"host": "worker.test", "username": "tester", "port": 22,
+            "fingerprint": "pin-one", "auth_kind": "password"}
+    nodes = [
+        {**base, "id": name, "binding_key": name, "workdir": "/work/" + name}
+        for name in bindings
+    ]
+    for name, change in [("other-user", {"username": "reader"}), ("new-pin", {"fingerprint": "pin-two"}),
+                         ("other-port", {"port": 2222}), ("key-login", {"auth_kind": "private_key"})]:
+        nodes.append({**base, **change, "id": name, "binding_key": name, "workdir": "/work"})
+    validated = []
+    preflights = []
+
+    def mock(route):
+        path = route.request.url.split("/api/autoeval/v1", 1)[1].split("?")[0]
+        data = []
+        if path == "/ssh-resources":
+            data = nodes
+        elif path.endswith("/validate"):
+            node = path.split("/")[-2]
+            validated.append(node)
+            if node == "agent-old":
+                route.fulfill(status=422, json={"detail": "工作目录不可用"})
+                return
+            data = {"evaluation_ready": False}
+        elif path == "/target-bindings":
+            data = [{"id": "model", "remote_model": "Host grouping fixture"}]
+        elif path == "/planning/options":
+            data = {"compilations": [{
+                "id": "config", "dataset": "GPQA", "target_id": "model", "input_ready": True,
+                "runtime_config": {"resource_ids": ["agent-old"]},
+                "config": {"subcommand": "llm_accuracy", "params": {}},
+            }], "manifests": [{"id": "full", "dataset": "GPQA", "scope": "full", "sample_count": 1}],
+                "curves": []}
+        elif path == "/planning/resources/preflight":
+            preflights.append(route.request.post_data_json)
+            data = {"id": "check", "state": "completed", "result": {"dataset_checks": []}}
+        route.fulfill(json={"data": data, "next_offset": None})
+
+    page.route("**/api/autoeval/v1/**", mock)
+    page.goto(url + "/#config/ssh-pool")
+    table = page.get_by_role("table")
+    expect(table.get_by_role("row")).to_have_count(6)
+    row = table.get_by_role("row").filter(has=page.get_by_text("3 项执行配置", exact=True))
+    expect(row.get_by_role("cell").first).to_have_text(login)
+    expect(row.get_by_text("accuracy-old", exact=True)).not_to_be_visible()
+    page.get_by_role("searchbox").fill("agent-old")
+    expect(table.get_by_role("row")).to_have_count(2)
+    row.get_by_text("3 项执行配置").click()
+    expect(row.get_by_text("工作目录 /work/agent-old")).to_be_visible()
+    row.get_by_role("button", name="验证 3 项连接").click()
+    expect(row.get_by_text("1 项验证失败")).to_be_visible()
+    expect(row.get_by_role("button")).to_be_enabled()
+    assert validated == bindings
+
+    page.goto(url + "/#console")
+    page.get_by_label("规划模型服务", exact=True).click()
+    page.get_by_text("Host grouping fixture", exact=True).click()
+    picker = page.get_by_label("规划执行资源", exact=True)
+    picker.click()
+    menu = page.get_by_role("group", name="候选 SSH 主机")
+    expect(menu.get_by_role("checkbox")).to_have_count(5)
+    menu.get_by_role("checkbox", name=login, exact=True).check()
+    menu.get_by_role("button", name="完成选择").click()
+    expect(picker).to_contain_text("已选 1 台主机")
+    page.get_by_label("启用 GPQA").check()
+    expect(page.get_by_label("GPQA 执行配置")).to_have_value("config")
+    page.get_by_role("button", name="环境检查", exact=True).click()
+    expect(page.get_by_text("查看环境检查详情")).to_be_visible()
+    assert preflights[-1]["resource_ids"] == bindings
+
+
+def test_unified_pool_and_dataset_preview(browser_page):
+    page, url, _ = browser_page
+    previews = []
+    image_id = "sha256:" + "a" * 64
+    mount = {"source": "/mnt/gpqa", "target": "/data/gpqa"}
+    datasets = {"GPQA": "llm_accuracy", "DeepSWE": "harbor_agent"}
+
+    def mock(route):
+        request = route.request
+        path = request.url.split("/api/autoeval/v1", 1)[1].split("?")[0]
+        data = []
+        if path == "/ssh-resources":
+            assert "nodes=true" in request.url
+            data = [{
+                "id": "node", "binding_key": "worker", "display_name": "测评机 01",
+                "host": "example.invalid", "port": 22, "username": "tester",
+                "legacy_ids": ["old"], "shared_image": {"version": "pilot", "image_id": image_id},
+                "datasets": {"GPQA": {"mounts": [mount], "last_passed_at": "2026-11-27T08:00:00Z"}},
+            }]
+        elif path == "/target-bindings":
+            data = [{"id": "model", "remote_model": "Fixture model"}]
+        elif path == "/planning/options":
+            data = {
+                "compilations": [
+                    {"id": d, "target_id": "model", "dataset": d, "input_ready": True,
+                     "runtime_config": {"resource_ids": ["old"]},
+                     "config": {"subcommand": mode, "params": {}}} for d, mode in datasets.items()
+                ],
+                "manifests": [
+                    {"id": d, "dataset": d, "scope": "full", "sample_count": 1} for d in datasets
+                ],
+                "curves": [],
+            }
+        elif path == "/planning/resources/preview":
+            body = request.post_data_json
+            previews.append(body)
+            data = [
+                {"dataset": d, "assigned_resource_id": "node", "execution_mode": datasets[d],
+                 "image_id": image_id if d == "GPQA" else None,
+                 "readonly_mounts": [mount] if d == "GPQA" else [],
+                 "blocking_reasons": [] if d == "GPQA" else ["dataset_mount_missing"]}
+                for task in body["tasks"] for d in [task["dataset"]]
+            ]
+        elif request.method == "POST":
+            pytest.fail(f"Unexpected write to {path}")
+        route.fulfill(json={"data": data, "next_offset": None})
+
+    page.route("**/api/autoeval/v1/**", mock)
+    page.goto(url + "/#config/ssh-pool")
+    pool = page.get_by_role("table")
+    expect(pool.get_by_role("row")).to_have_count(2)
+    expect(pool).to_contain_text("测评机 01")
+    pool.get_by_text("AISBench · pilot · 1 个数据集").click()
+    expect(pool.get_by_text("/mnt/gpqa → /data/gpqa")).to_be_visible()
+    expect(pool.get_by_text("最近预检通过", exact=False)).to_be_visible()
+    page.goto(url + "/#console")
+    page.get_by_label("规划模型服务", exact=True).click()
+    page.get_by_text("Fixture model", exact=True).click()
+    for dataset in datasets:
+        page.get_by_label("启用 " + dataset).check()
+    expect(page.get_by_label("GPQA 执行配置").locator("..")).to_contain_text("/data/gpqa")
+    expect(page.get_by_label("DeepSWE 执行配置").locator("..")).to_contain_text("尚未登记此数据集的挂载")
+    assert previews[-1]["resource_ids"] == ["node"]
+    assert {task["dataset"] for task in previews[-1]["tasks"]} == set(datasets)
+
+
 @pytest.mark.skipif(not os.getenv("AE_BROWSER_URL"), reason="Explicit local browser URL required")
 def test_add_ssh_node_preserves_planning_form():
     nodes = []
@@ -249,7 +390,10 @@ def test_preflight_elapsed_and_all_pool_nodes():
         page.get_by_role("button", name="GPQA 前移").click()
         page.get_by_role("group", name="GPQA 样本执行策略").get_by_role("button", name="并行执行").click()
         page.get_by_label("GPQA case 并发", exact=True).fill("6")
-        page.clock.run_for(700)
+        with page.expect_response(lambda response: "/planning/plans" in response.url
+                                  and any(t.get("dataset") == "GPQA" and t.get("concurrency") == 6
+                                          for t in (response.request.post_data_json or {}).get("tasks", []))):
+            page.clock.run_for(700)
         assert len(attempts) == check_count
         assert next(t for t in estimates[-1]["tasks"] if t["dataset"] == "GPQA")["concurrency"] == 6
         expect(summary.get_by_text("4/4 通过")).to_be_visible()

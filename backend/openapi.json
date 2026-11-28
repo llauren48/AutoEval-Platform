@@ -1383,6 +1383,47 @@
         }
       }
     },
+    "/api/autoeval/v1/planning/resources/preview": {
+      "post": {
+        "tags": [
+          "task planning"
+        ],
+        "summary": "Preview Resources",
+        "operationId": "preview_resources_api_autoeval_v1_planning_resources_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_DatasetEnvironmentPreview__"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/autoeval/v1/planning/resources/preflight": {
       "post": {
         "tags": [
@@ -4475,6 +4516,18 @@
         ],
         "summary": "Register",
         "operationId": "register_api_autoeval_v1_ssh_resources_post",
+        "parameters": [
+          {
+            "name": "node",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Node"
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4542,6 +4595,16 @@
               "default": false,
               "title": "Include Test"
             }
+          },
+          {
+            "name": "nodes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Nodes"
+            }
           }
         ],
         "responses": {
@@ -4549,7 +4612,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PageEnvelope_SSHNodeView_"
+                }
               }
             }
           },
@@ -7135,6 +7200,85 @@
         ],
         "title": "CurveOption"
       },
+      "DatasetEnvironmentPreview": {
+        "properties": {
+          "dataset": {
+            "type": "string",
+            "title": "Dataset"
+          },
+          "assigned_resource_id": {
+            "type": "string",
+            "title": "Assigned Resource Id"
+          },
+          "execution_mode": {
+            "type": "string",
+            "title": "Execution Mode"
+          },
+          "image_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Id"
+          },
+          "readonly_mounts": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Readonly Mounts"
+          },
+          "blocking_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Blocking Reasons"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dataset",
+          "assigned_resource_id",
+          "execution_mode",
+          "image_id",
+          "readonly_mounts",
+          "blocking_reasons"
+        ],
+        "title": "DatasetEnvironmentPreview"
+      },
+      "DatasetMount": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "DatasetMount"
+      },
       "Decision": {
         "properties": {
           "expected_revision": {
@@ -7730,6 +7874,27 @@
           "request_id"
         ],
         "title": "Envelope[dict]"
+      },
+      "Envelope_list_DatasetEnvironmentPreview__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/DatasetEnvironmentPreview"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "request_id"
+        ],
+        "title": "Envelope[list[DatasetEnvironmentPreview]]"
       },
       "Envelope_list_ExecutorAttempt__": {
         "properties": {
@@ -8809,6 +8974,39 @@
         ],
         "title": "PageEnvelope[RunListItem]"
       },
+      "PageEnvelope_SSHNodeView_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/SSHNodeView"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "next_offset",
+          "request_id"
+        ],
+        "title": "PageEnvelope[SSHNodeView]"
+      },
       "Parameters": {
         "properties": {
           "output": {
@@ -9306,6 +9504,34 @@
         ],
         "title": "RegisterExecutor"
       },
+      "RegisteredDataset": {
+        "properties": {
+          "mounts": {
+            "items": {
+              "$ref": "#/components/schemas/DatasetMount"
+            },
+            "type": "array",
+            "title": "Mounts"
+          },
+          "last_passed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Passed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mounts",
+          "last_passed_at"
+        ],
+        "title": "RegisteredDataset"
+      },
       "ReportFilters": {
         "properties": {
           "models": {
@@ -9680,11 +9906,173 @@
         ],
         "title": "SSHCredential"
       },
+      "SSHNodeView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "binding_key": {
+            "type": "string",
+            "title": "Binding Key"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "title": "Port"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "fingerprint": {
+            "type": "string",
+            "title": "Fingerprint"
+          },
+          "workdir": {
+            "type": "string",
+            "title": "Workdir"
+          },
+          "auth_kind": {
+            "type": "string",
+            "title": "Auth Kind"
+          },
+          "provider_kind": {
+            "type": "string",
+            "title": "Provider Kind"
+          },
+          "native_tool_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native Tool Root"
+          },
+          "native_bridge_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native Bridge Sha256"
+          },
+          "native_lock_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native Lock Sha256"
+          },
+          "native_tool_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native Tool Revision"
+          },
+          "evaluation_ready": {
+            "type": "boolean",
+            "title": "Evaluation Ready"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "legacy_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Ids"
+          },
+          "shared_image": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SharedImage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "datasets": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/RegisteredDataset"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "binding_key",
+          "version",
+          "host",
+          "port",
+          "username",
+          "fingerprint",
+          "workdir",
+          "auth_kind",
+          "provider_kind",
+          "native_tool_root",
+          "native_bridge_sha256",
+          "native_lock_sha256",
+          "native_tool_revision",
+          "evaluation_ready"
+        ],
+        "title": "SSHNodeView"
+      },
       "SSHResourceInput": {
         "properties": {
           "binding_key": {
             "type": "string",
-            "pattern": "^[a-zA-Z0-9_.-]{1,128}$",
+            "pattern": "^[a-zA-Z0-9_一-鿿.-][a-zA-Z0-9_一-鿿. -]{0,127}$",
             "title": "Binding Key"
           },
           "host": {
@@ -9812,6 +10200,46 @@
           "service_name"
         ],
         "title": "ServiceUpdate"
+      },
+      "SharedImage": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Version"
+          },
+          "image_id": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Image Id"
+          },
+          "aisbench_revision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Aisbench Revision"
+          },
+          "harbor_revision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Harbor Revision"
+          },
+          "tool_root": {
+            "type": "string",
+            "pattern": "^/[^,]+$",
+            "title": "Tool Root"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "image_id",
+          "aisbench_revision",
+          "harbor_revision",
+          "tool_root"
+        ],
+        "title": "SharedImage"
       },
       "Submission": {
         "properties": {

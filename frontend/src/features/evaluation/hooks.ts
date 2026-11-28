@@ -19,7 +19,7 @@ export function useOptions<T>(path: string, enabled = true) {
     setError("");
     setRows([]);
     setNext(null);
-    apiGetOptions<T[]>(`${path}?offset=${offset}&limit=${REGISTRY_PAGE_SIZE}`, controller.signal)
+    apiGetOptions<T[]>(`${path}${path.includes("?") ? "&" : "?"}offset=${offset}&limit=${REGISTRY_PAGE_SIZE}`, controller.signal)
       .then((page) => {
         if (!controller.signal.aborted) {
           setRows(page.data);

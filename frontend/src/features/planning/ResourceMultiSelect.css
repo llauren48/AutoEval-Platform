@@ -13,4 +13,4 @@
 .resource-multi-options span { overflow-wrap: anywhere; }
 .resource-multi-done { display: block; width: 100%; padding: 9px; margin-top: 8px; color: var(--primary); background: var(--accent-hover); border: 0; border-radius: 7px; }
 
-.resource-multi-options strong { display: block; padding: 6px 10px; color: #606982; font-size: 13px; overflow-wrap: anywhere; }
+.resource-multi-options small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }

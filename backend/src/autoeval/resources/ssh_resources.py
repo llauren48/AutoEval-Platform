@@ -10,15 +10,24 @@ from typing import Literal
 import paramiko
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from autoeval.infrastructure.responses import PageEnvelope
 from autoeval.infrastructure.secrets import FileSecretStore
 from autoeval.resources.models import ResourceProvider, SSHResourceBinding
+from autoeval.resources.node_inventory import (
+    SharedImage,
+    checked_aliases,
+    planning_config,
+    shared_node,
+)
 from autoeval.resources.ssh_executor import SSHConnection, SSHExecutor, load_private_key
 
 # The native bridge module stays at the package root; pin its bytes by absolute path.
-_AISBENCH_NATIVE_PATH = Path(__file__).resolve().parents[2] / "autoeval_runtime" / "aisbench_native.py"
+_AISBENCH_NATIVE_PATH = (
+    Path(__file__).resolve().parents[2] / "autoeval_runtime" / "aisbench_native.py"
+)
 
 
 class SSHCredential(BaseModel):
@@ -29,7 +38,7 @@ class SSHCredential(BaseModel):
 
 class SSHResourceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    binding_key: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,128}$")
+    binding_key: str = Field(pattern=r"^[a-zA-Z0-9_一-鿿.-][a-zA-Z0-9_一-鿿. -]{0,127}$")
     host: str = Field(pattern=r"^[a-zA-Z0-9_.:-]{1,253}$")
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(pattern=r"^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$")
@@ -38,6 +47,38 @@ class SSHResourceInput(BaseModel):
     auth_kind: Literal["password", "private_key"]
     credential_ref: str = Field(pattern=r"^[0-9a-f]{32}$")
     native_tool_root: str | None = Field(default=None, min_length=2, max_length=512)
+
+
+class DatasetMount(BaseModel):
+    source: str
+    target: str
+
+
+class RegisteredDataset(BaseModel):
+    mounts: list[DatasetMount]
+    last_passed_at: str | None
+
+
+class SSHNodeView(BaseModel):
+    id: uuid.UUID
+    binding_key: str
+    version: int
+    host: str
+    port: int
+    username: str
+    fingerprint: str
+    workdir: str
+    auth_kind: str
+    provider_kind: str
+    native_tool_root: str | None
+    native_bridge_sha256: str | None
+    native_lock_sha256: str | None
+    native_tool_revision: str | None
+    evaluation_ready: bool
+    display_name: str | None = None
+    legacy_ids: list[uuid.UUID] | None = None
+    shared_image: SharedImage | None = None
+    datasets: dict[str, RegisteredDataset] | None = None
 
 
 def connection_for(row, settings):
@@ -95,7 +136,7 @@ async def save_credential(body: SSHCredential, request: Request):
 
 
 @router.post("", status_code=201)
-async def register(body: SSHResourceInput, request: Request):
+async def register(body: SSHResourceInput, request: Request, node: bool = False):
     try:
         if body.native_tool_root is not None:
             SSHConnection.absolute_directory(body.native_tool_root)
@@ -110,6 +151,26 @@ async def register(body: SSHResourceInput, request: Request):
         if body.auth_kind == "private_key":
             load_private_key(secret)
         async with request.app.state.sessions() as session, session.begin():
+            if node:
+                address = body.host.casefold().rstrip(".")
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": json.dumps(["ssh-node", address, body.port, body.username])},
+                )
+                existing = await session.scalar(
+                    select(SSHResourceBinding.id)
+                    .where(
+                        func.rtrim(func.lower(SSHResourceBinding.host), ".") == address,
+                        SSHResourceBinding.port == body.port,
+                        SSHResourceBinding.username == body.username,
+                        SSHResourceBinding.fingerprint == body.fingerprint,
+                        SSHResourceBinding.auth_kind == body.auth_kind,
+                        SSHResourceBinding.workdir == body.workdir,
+                    )
+                    .limit(1)
+                )
+                if existing:
+                    raise HTTPException(409, "该 SSH 登录环境已登记，请使用已有节点")
             provider = await session.scalar(
                 select(ResourceProvider).where(ResourceProvider.name == "customer-ssh")
             )
@@ -142,14 +203,48 @@ async def register(body: SSHResourceInput, request: Request):
     return {"data": data, "request_id": request.state.request_id}
 
 
-@router.get("")
+async def dataset_registrations(session, resource_id, image, node):
+    from autoeval.planning.models import PlanningArtifact
+    from autoeval.planning.planning_transport import readonly_mount_paths
+
+    registrations = {}
+    for dataset, mounts in node["datasets"].items():
+        paths = [
+            dict(zip(("source", "target"), readonly_mount_paths(mount), strict=True))
+            for mount in mounts
+        ]
+        check = PlanningArtifact.payload["result"]["dataset_checks"][0]
+        # Only display evidence for this image and this dataset's current mount list.
+        evidence = await session.scalar(
+            select(check["preflight_evidence"]["checked_at"].astext)
+            .where(
+                PlanningArtifact.kind == "dataset_preflight",
+                check["assigned_resource_id"].astext == str(resource_id),
+                check["dataset"].astext == dataset,
+                check["image_id"].astext == image.image_id,
+                check["readonly_mounts"] == mounts,
+            )
+            .order_by(PlanningArtifact.created_at.desc())
+            .limit(1)
+        )
+        registrations[dataset] = {"mounts": paths, "last_passed_at": evidence}
+    return registrations
+
+
+@router.get("", response_model=PageEnvelope[SSHNodeView], response_model_exclude_unset=True)
 async def list_resources(
-    request: Request, offset: int = 0, limit: int = 50, include_test: bool = False
+    request: Request,
+    offset: int = 0,
+    limit: int = 50,
+    include_test: bool = False,
+    nodes: bool = False,
 ):
     if offset < 0 or not 1 <= limit <= 200:
         raise HTTPException(422, "Invalid pagination")
     try:
         async with request.app.state.sessions() as session:
+            config = planning_config(request.app.state.settings) if nodes else {}
+            aliases = await checked_aliases(session, config)
             rows = (
                 await session.scalars(
                     select(SSHResourceBinding)
@@ -164,16 +259,36 @@ async def list_resources(
                             ),
                         )
                     )
+                    .where(
+                        SSHResourceBinding.id.not_in([uuid.UUID(i) for i in aliases])
+                        if aliases
+                        else True
+                    )
                     .order_by(SSHResourceBinding.created_at.desc(), SSHResourceBinding.id.desc())
                     .offset(offset)
                     .limit(limit + 1)
                 )
             ).all()
+            data = []
+            for row in rows[:limit]:
+                item = resource_data(row)
+                registration = shared_node(config, row.id)
+                if registration:
+                    image, node = registration
+                    item.update(
+                        display_name=node.get("display_name") or row.binding_key,
+                        legacy_ids=[old for old, new in aliases.items() if new == str(row.id)],
+                        shared_image=image.model_dump(),
+                        datasets=await dataset_registrations(session, row.id, image, node),
+                    )
+                data.append(item)
         return {
-            "data": [resource_data(r) for r in rows[:limit]],
+            "data": data,
             "next_offset": offset + limit if len(rows) > limit else None,
             "request_id": request.state.request_id,
         }
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise HTTPException(503, "SSH 节点配置无效，请检查镜像、挂载与旧节点映射") from exc
     except SQLAlchemyError as exc:
         raise HTTPException(503, "SSH resource database unavailable") from exc
 

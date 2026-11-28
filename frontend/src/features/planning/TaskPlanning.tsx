@@ -10,9 +10,10 @@ import { serviceLabel } from "../resources/serviceKind";
 import { ModelServices } from "../resources/ModelServices";
 import { ProbeProgress } from "../evaluation/ProbeProgress";
 import { Clock3, LoaderCircle } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiGet, apiGetPage, apiPost } from "../../shared/api";
 import type { Resource, Target } from "../evaluation/types";
+import type { components } from "../../shared/types/api";
 import { useOptions } from "../evaluation/hooks";
 import { usePolling } from "../../shared/hooks/usePolling";
 import { ManagementDrawer } from "../../shared/ui/ManagementDrawer";
@@ -25,8 +26,16 @@ type Options = {
   manifests: { id: string; dataset: string; scope: string; sample_count: number; sha256?: string }[];
   curves: { id: string; target_id: string; resource_id: string; resource_kind: string; measured_at: string }[];
 };
-type DatasetCheck = { preflight_evidence?: PreflightEvidence; task_id: string; assigned_resource_id?: string; dataset: string; data_path: string | null; tool_revision: string | null; expected_tool_revision: string; blocking_reasons: string[]; warnings?: string[] };
+type DatasetEnvironmentPreview = components["schemas"]["DatasetEnvironmentPreview"];
+type DatasetCheck = { execution_mode?: string; image_id?: string; readonly_mounts?: (string | { source: string; target: string })[]; preflight_evidence?: PreflightEvidence; task_id: string; assigned_resource_id?: string; dataset: string; data_path: string | null; tool_revision: string | null; expected_tool_revision: string; blocking_reasons: string[]; warnings?: string[] };
 const preflightReasons: Record<string, string> = {
+  dataset_mount_content_mismatch: "AISBench 配置所需的数据文件缺失、为空或位于登记挂载以外",
+  dataset_resource_mismatch: "执行配置未绑定所选节点",
+  dataset_mount_missing: "所选节点尚未登记此数据集的挂载",
+  dataset_execution_config_mismatch: "数据目录、源码目录或工具版本与节点登记不匹配",
+  shared_image_unavailable: "节点缺少固定版本的执行镜像",
+  dataset_mount_unavailable: "节点无法访问已登记的宿主机数据目录",
+  harbor_revision_mismatch: "镜像内 Harbor 版本与登记不一致",
   dataset_not_validated: "该资源尚未完成此数据集的小样本验收",
   dataset_path_unavailable: "执行容器无法访问数据目录",
   dataset_path_missing: "配置缺少数据目录",
@@ -147,7 +156,7 @@ function ConfigNameEditor({ id, current, onSaved }: { id: string; current: strin
 
 export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }: { initialTarget?: string; poolRevision: number; onManagePool: (add?: boolean) => void }) {
   const targets = useOptions<Target>("/target-bindings");
-  const ssh = useOptions<Resource>("/ssh-resources");
+  const ssh = useOptions<Resource>("/ssh-resources?nodes=true");
   const retryResources = useRef(ssh.retry);
   useEffect(() => { if (poolRevision) retryResources.current(); }, [poolRevision]);
   const [target, setTarget] = useState(initialTarget);
@@ -164,7 +173,17 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
   const [resource, setResource] = useState("");
   const manualNodeSelection = useRef(false);
   const [resourceIds, setResourceIds] = useState<string[]>([]);
-  const [options, setOptions] = useState<Options>({ compilations: [], manifests: [], curves: [] });
+  const [loadedOptions, setOptions] = useState<Options>({ compilations: [], manifests: [], curves: [] });
+  const options = useMemo(() => {
+    const aliases = new Map(ssh.rows.flatMap(row => (row.legacy_ids || []).map(id => [id, row.id] as const)));
+    if (!aliases.size) return loadedOptions;
+    return { ...loadedOptions, compilations: loadedOptions.compilations.map(config => {
+      const ids = config.runtime_config?.resource_ids;
+      if (!Array.isArray(ids)) return config;
+      return { ...config, runtime_config: { ...config.runtime_config,
+        resource_ids: [...new Set(ids.map(id => aliases.get(id) || id))] } };
+    }) };
+  }, [loadedOptions, ssh.rows]);
   const [selection, setSelection] = useState<Record<string, { compilation: string; manifest: string }>>({});
   const [enabled, setEnabled] = useState<string[]>([]);
   const [curve, setCurve] = useState("");
@@ -198,6 +217,7 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
   const pending = useRef<{ body: string; key: string } | null>(null);
   const resources = ssh;
   const hosts = groupSshHosts(resources.rows);
+  const hostNames = new Map(hosts.flatMap(host => host.resources.map(row => [row.id, host.label] as const)));
   const selectedHostCount = hosts.filter(host => host.resources.some(row => resourceIds.includes(row.id))).length;
   const refresh = async () => {
     const collected: Options = { compilations: [], manifests: [], curves: [] };
@@ -322,6 +342,20 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
       } as Record<string, string>)[adviceJob.state] ?? "优化建议状态待确认"
     : null;
   const probeBlocked = !!probe && ["pending", "running", "unresolved"].includes(probe.state);
+  const unifiedSelection = resources.rows.some(row => row.shared_image && resourceIds.includes(row.id));
+  const [preview, setPreview] = useState<DatasetEnvironmentPreview[]>([]);
+  const [previewError, setPreviewError] = useState("");
+  useEffect(() => {
+    setPreview([]); setPreviewError("");
+    if (!ready || !unifiedSelection) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      apiPost<DatasetEnvironmentPreview[]>("/planning/resources/preview", JSON.parse(preflightFingerprint))
+        .then(rows => { if (active) setPreview(rows); })
+        .catch(error => { if (active) setPreviewError(error instanceof Error ? error.message : "节点匹配失败"); });
+    }, 250);
+    return () => { active = false; clearTimeout(timer); };
+  }, [ready, unifiedSelection, preflightFingerprint]);
   const checking = !!preflight && ["pending", "running"].includes(preflight.state);
   const preflightLabel = !preflight ? (checkError ? "请求失败" : checkExpired ? "已过期" : "未检查") : ({ pending: "排队中", running: "检查中", completed: preflight.result?.execution_ready ? "检查通过" : "存在阻塞", failed: "检查失败", cancelled: "已取消" } as Record<string, string>)[preflight.state] || "状态待确认";
   const preflightTone = checking ? "checking" : preflight?.result?.execution_ready ? "passed" : "blocked";
@@ -474,7 +508,8 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
       const availableManifests = options.manifests.filter(manifest =>
         manifest.dataset === d && (!Array.isArray(allowedManifests) || allowedManifests.includes(manifest.id)));
       const check = preflight?.result?.dataset_checks?.find(row => row.dataset === d);
-      const assigned = resources.rows.find(r => r.id === check?.assigned_resource_id);
+      const planned = preview.find(row => row.dataset === d);
+      const assigned = resources.rows.find(r => r.id === (check || planned)?.assigned_resource_id);
       const configs = groups.find(group => group.dataset === d)!.configs;
       return <tr key={d}>
         <td><input type="checkbox" aria-label={`启用 ${d}`} checked={active}
@@ -486,7 +521,10 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
             placeholder={!target ? "先选择模型服务" : !configs.length ? "暂无可用配置" : "请选择执行配置"}
             options={configs.map(c => ({ id: c.id, label: c.name }))}
             onChange={compilation => setSelection(rows => ({ ...rows, [d]: { ...rows[d], compilation } }))} />
-          {active && chosenConfig && assigned && <small className="muted">{check?.tool_revision && `${chosenConfig.config.subcommand === "harbor_agent" ? "Harbor" : "AISBench"} ${check.tool_revision.slice(0, 12)}`}</small>}
+          {active && planned && <small>{hostNames.get(planned.assigned_resource_id)} · {planned.execution_mode}
+            {planned.blocking_reasons.length ? " · " + describePreflight(planned.blocking_reasons)
+              : planned.readonly_mounts?.map(m => <span key={typeof m === "string" ? m : m.target}> · {typeof m === "string" ? m : m.target}</span>)}</small>}
+          {active && chosenConfig && assigned && check?.tool_revision && <small className="muted">AISBench {check.tool_revision.slice(0, 12)}</small>}
         </td>
         <td data-label="样本范围">
           <DatasetSelect label={`${d} 样本范围`} disabled={!active || !selection[d]?.compilation}
@@ -497,10 +535,11 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
         <td><span className="planning-row-state">{!active ? "未启用" : !configs.length ? "需配置" : selection[d]?.compilation && selection[d]?.manifest ? "已配置" : "待补全"}</span></td>
       </tr>;
     })}</tbody></table></TableWrap>
+    {previewError && <p role="status">{previewError}</p>}
     {enabled.map(dataset => {
       const bound = options.compilations.filter(c => c.target_id === target && c.input_ready && c.dataset === dataset);
       if (!bound.length || bound.some(c => !Array.isArray(c.runtime_config?.resource_ids) || resourceIds.some(id => (c.runtime_config!.resource_ids as string[]).includes(id)))) return null;
-      const names = [...new Set(bound.flatMap(c => (c.runtime_config?.resource_ids as string[]).map(id => ssh.rows.find(r => r.id === id)?.binding_key || id)))];
+      const names = [...new Set(bound.flatMap(c => (c.runtime_config?.resource_ids as string[]).map(id => hostNames.get(id) || id)))];
       return <p className="notice" key={dataset}>{dataset} 配置需使用执行资源：{names.join("、")}。请切换资源后选择配置。</p>;
     })}
     <details className="planning-management"><summary>管理配置与清单 · 缺少配置时在此维护</summary>
@@ -523,7 +562,9 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
         <summary>{check.dataset}{check.blocking_reasons.length > 0 && " · 存在阻塞"}</summary>
         {!!check.blocking_reasons.length && <p>{describePreflight(check.blocking_reasons)}</p>}
         <dl>
-          <dt>资源配置</dt><dd>{resources.rows.find(row => row.id === check.assigned_resource_id)?.binding_key || "待匹配"}</dd>
+          <dt>匹配节点</dt><dd>{hostNames.get(check.assigned_resource_id || "") || "待匹配"}</dd>
+          {check.execution_mode && <><dt>运行模式</dt><dd>{check.execution_mode}</dd><dt>执行镜像</dt><dd><code>{check.image_id}</code></dd>
+            <dt>只读挂载</dt><dd>{check.readonly_mounts?.map(m => <div key={typeof m === "string" ? m : m.target}>{typeof m === "string" ? m : `${m.source} → ${m.target}`}</div>)}</dd></>}
           {check.preflight_evidence && <><dt>预检容器 ID</dt><dd><code>{check.preflight_evidence.container_id}</code></dd><dt>原始预检时间</dt><dd>{new Date(check.preflight_evidence.checked_at).toLocaleString("zh-CN")}</dd><dt>来源预检任务</dt><dd>{check.preflight_evidence.source_job_id}</dd></>}
           <dt>数据路径</dt><dd>{check.data_path || "未配置"}</dd>
           <dt>工具版本</dt><dd>{check.tool_revision?.slice(0, 12) || `校验未通过（要求 ${check.expected_tool_revision?.slice(0, 12) || "未知"}）`}</dd>
@@ -539,7 +580,7 @@ export function TaskPlanning({ poolRevision, onManagePool, initialTarget = "" }:
       <section className="strategy-card strategy-datasets" aria-label="数据集执行设置">
         <div className="strategy-card-heading"><h3>数据集之间</h3><span>已选 {enabled.length} 个数据集</span></div>
         <div className="strategy-controls">
-          <div><span className="strategy-field-label">执行方式</span><StrategyChoice label="数据集执行策略" parallel={parallel > 1} disabled={enabled.length < 2} onChange={value => setParallel(value ? Math.min(2, maxParallel) : 1)} /></div>
+          <div><span className="strategy-field-label">执行方式</span><StrategyChoice label="数据集执行策略" parallel={parallel > 1} disabled={enabled.length < 2} onChange={value => setParallel(value ? maxParallel : 1)} /></div>
           <label>同时运行的数据集上限
             <select aria-label="数据集同时运行数" value={parallel} disabled={parallel === 1} onChange={e => setParallel(Number(e.target.value))}>
               {parallel === 1 ? <option value={1}>1 个</option> : Array.from({ length: maxParallel - 1 }, (_, index) => index + 2).map(count =>
