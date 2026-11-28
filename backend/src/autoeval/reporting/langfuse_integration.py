@@ -209,18 +209,22 @@ async def import_one(row, settings, artifact):
                 await asyncio.sleep(2)
             else:
                 raise RuntimeError("Trace ingestion not confirmed")
+            score_failed = False
             for item in score_items(rec):
-                response = await client.post(
-                    host + "/api/public/scores",
-                    json={
-                        **item,
-                        "id": score_id(trace_id, item["name"]),
-                        "traceId": trace_id,
-                        "observationId": format(plan[0].span_id, "016x"),
-                        "timestamp": plan[0].start_ts,
-                    },
-                )
-                response.raise_for_status()
+                payload = {
+                    **item,
+                    "id": score_id(trace_id, item["name"]),
+                    "traceId": trace_id,
+                    "observationId": format(plan[0].span_id, "016x"),
+                    "timestamp": plan[0].start_ts,
+                }
+                try:
+                    response = await client.post(host + "/api/public/scores", json=payload)
+                    response.raise_for_status()
+                except httpx.HTTPError:
+                    score_failed = True
+            if score_failed:
+                raise RuntimeError("Score ingestion not confirmed")
         return trace_id
 
 

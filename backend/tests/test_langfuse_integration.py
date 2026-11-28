@@ -207,7 +207,6 @@ async def test_import_retries_scores_directly_under_container_proxy(monkeypatch,
     from threading import Thread
     from urllib.parse import urlsplit
 
-    import httpx
     from harborstack.convert.scores import score_id
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
@@ -217,6 +216,9 @@ async def test_import_retries_scores_directly_under_container_proxy(monkeypatch,
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")
     monkeypatch.setenv("no_proxy", "other.invalid")
 
+    data = artifact()
+    del data["files"]["verifier/reward.txt"]
+    data["files"]["verifier/reward.json"] = json.dumps({"reward": 1, "quality": 0.5})
     received_spans = []
     scores = []
 
@@ -244,7 +246,7 @@ async def test_import_retries_scores_directly_under_container_proxy(monkeypatch,
             self.end_headers()
 
     row = SimpleNamespace(attempt_id=uuid.uuid4())
-    _, plan = build_plan(artifact(), tmp_path, str(row.attempt_id))
+    _, plan = build_plan(data, tmp_path, str(row.attempt_id))
     trace_id = format(plan[0].trace_id, "032x")
     with HTTPServer(("127.0.0.1", 0), LangfuseHandler) as server:
         thread = Thread(target=server.serve_forever)
@@ -258,9 +260,11 @@ async def test_import_retries_scores_directly_under_container_proxy(monkeypatch,
                 langfuse_secret_key="secret",
                 _env_file=None,
             )
-            with pytest.raises(httpx.HTTPStatusError, match="503"):
-                await import_one(row, settings, artifact())
-            assert await import_one(row, settings, artifact()) == trace_id
+            with pytest.raises(RuntimeError, match="Score ingestion not confirmed"):
+                await import_one(row, settings, data)
+            first_scores = scores.copy()
+            assert "reward.quality" in [item["name"] for item in first_scores]
+            assert await import_one(row, settings, data) == trace_id
         finally:
             server.shutdown()
             thread.join()
@@ -269,16 +273,13 @@ async def test_import_retries_scores_directly_under_container_proxy(monkeypatch,
         format(spec.span_id, "016x") for spec in plan
     )
     assert all(span.trace_id.hex() == trace_id for span in received_spans)
-    assert (
-        scores[0]
-        == scores[1]
-        == {
-            "name": "reward",
-            "value": 1.0,
-            "dataType": "NUMERIC",
-            "id": score_id(trace_id, "reward"),
-            "traceId": trace_id,
-            "observationId": format(plan[0].span_id, "016x"),
-            "timestamp": plan[0].start_ts,
-        }
-    )
+    assert scores == first_scores * 2
+    assert scores[0] == {
+        "name": "reward",
+        "value": 1.0,
+        "dataType": "NUMERIC",
+        "id": score_id(trace_id, "reward"),
+        "traceId": trace_id,
+        "observationId": format(plan[0].span_id, "016x"),
+        "timestamp": plan[0].start_ts,
+    }
