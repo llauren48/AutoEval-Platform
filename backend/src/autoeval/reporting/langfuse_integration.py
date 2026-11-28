@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+import os
 import tempfile
 import uuid
 from pathlib import Path
@@ -117,9 +118,46 @@ def trace_view(row, settings):
     }
 
 
+def send_spans(host, authorization, plan):
+    from harborstack.convert.export import PlanIds, execute_plan
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from requests import Session
+
+    # The pinned HarborStack Exporter cannot accept an OTLP session.
+    ids = PlanIds()
+    ids.arm(plan[0].trace_id, [spec.span_id for spec in plan])
+    with Session() as session:
+        session.trust_env = False
+        exporter = OTLPSpanExporter(
+            endpoint=host + "/api/public/otel/v1/traces",
+            headers={"Authorization": authorization, "x-langfuse-ingestion-version": "4"},
+            session=session,
+            certificate_file=(
+                os.getenv("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE")
+                or os.getenv("OTEL_EXPORTER_OTLP_CERTIFICATE")
+                or os.getenv("REQUESTS_CA_BUNDLE")
+                or os.getenv("CURL_CA_BUNDLE")
+            ),
+        )
+        provider = TracerProvider(
+            resource=Resource.create(
+                {"service.name": "harborstack", "langfuse.environment": "experiment"}
+            ),
+            id_generator=ids,
+        )
+        try:
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            execute_plan(provider.get_tracer("harborstack"), plan)
+            provider.force_flush()
+        finally:
+            provider.shutdown()
+
+
 async def import_one(row, settings, artifact):
-    from harborstack.convert.export import Exporter
-    from harborstack.convert.scores import backfill
+    from harborstack.convert.scores import score_id, score_items
 
     if not settings.langfuse_host or not settings.langfuse_browser_url:
         raise ValueError("Langfuse not configured")
@@ -131,9 +169,12 @@ async def import_one(row, settings, artifact):
         host = settings.langfuse_host.rstrip("/")
         public = settings.langfuse_public_key.get_secret_value()
         secret = settings.langfuse_secret_key.get_secret_value()
-        auth = base64.b64encode(f"{public}:{secret}".encode()).decode()
+        authorization = "Basic " + base64.b64encode(f"{public}:{secret}".encode()).decode()
         async with httpx.AsyncClient(
-            timeout=15, headers={"Authorization": "Basic " + auth}
+            timeout=15,
+            trust_env=False,
+            transport=httpx.AsyncHTTPTransport(),  # Retain configured CA roots on direct HTTPS.
+            headers={"Authorization": authorization},
         ) as client:
             expected_ids = {format(spec.span_id, "016x") for spec in plan}
 
@@ -161,33 +202,25 @@ async def import_one(row, settings, artifact):
             if existing and not expected_ids <= existing:
                 raise RuntimeError("Partial trace ingestion; automatic resend refused")
             if not existing:
-
-                def send():
-                    exporter = Exporter(host, public, secret)
-                    try:
-                        exporter.send(plan)
-                        exporter.flush()
-                    finally:
-                        exporter.shutdown()
-
-                await asyncio.to_thread(send)
+                await asyncio.to_thread(send_spans, host, authorization, plan)
             for _ in range(10):
                 if expected_ids <= await observation_ids():
                     break
                 await asyncio.sleep(2)
             else:
                 raise RuntimeError("Trace ingestion not confirmed")
-            scores = await asyncio.to_thread(
-                backfill,
-                host,
-                public,
-                secret,
-                {"trace_id": trace_id, "observation_id": format(plan[0].span_id, "016x")},
-                rec,
-                timestamp=plan[0].start_ts,
-            )
-            if any(status is None or status >= 300 for _, status, _ in scores):
-                raise RuntimeError("Score ingestion not confirmed")
+            for item in score_items(rec):
+                response = await client.post(
+                    host + "/api/public/scores",
+                    json={
+                        **item,
+                        "id": score_id(trace_id, item["name"]),
+                        "traceId": trace_id,
+                        "observationId": format(plan[0].span_id, "016x"),
+                        "timestamp": plan[0].start_ts,
+                    },
+                )
+                response.raise_for_status()
         return trace_id
 
 
