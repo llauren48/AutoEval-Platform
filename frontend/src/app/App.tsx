@@ -17,6 +17,7 @@ import { RealLeaderboard } from "../features/reporting/RealLeaderboard";
 import { useEffect, useState } from "react";
 import {
   Activity,
+  AlertCircle,
   ChartNoAxesColumnIncreasing,
   ChevronRight,
   ClipboardList,
@@ -28,13 +29,21 @@ import {
   Play,
   SlidersHorizontal,
   Database,
+  Settings2,
+  ShieldAlert,
   Sparkles,
   Trophy,
+  Users,
   Zap,
 } from "lucide-react";
 import { Card } from "../shared/ui/Card";
 import { Badge } from "../shared/ui/Badge";
 import { Note } from "../shared/ui/Note";
+import { LoginPage } from "../features/identity/LoginPage";
+import { UserArea } from "../features/identity/UserArea";
+import { AdminUsers } from "../features/admin/AdminUsers";
+import { AdminConfig } from "../features/admin/AdminConfig";
+import { useCurrentUser, useGateProviders } from "../features/identity/useCurrentUser";
 import "../styles/index.css";
 
 const menus = [
@@ -46,6 +55,13 @@ const menus = [
   { id: "leaderboard", label: "测评榜单", icon: Trophy },
   { id: "data-workbench", label: "数据工作台", icon: Database },
 ];
+
+// 管理员专属导航：仅角色为 admin 的登录用户可见（受后端 require_admin 双重校验）
+const adminMenus = [
+  { id: "admin/users", label: "用户管理", icon: Users },
+  { id: "admin/config", label: "平台配置", icon: Settings2 },
+];
+const allMenus = [...menus, ...adminMenus];
 
 export function App() {
   const [initialTarget, setInitialTarget] = useState("");
@@ -60,6 +76,15 @@ export function App() {
   const [poolRevision, setPoolRevision] = useState(0);
   const poolPage = page === "config/ssh-pool" || page === "config/ssh-pool/add";
   const [toast, setToast] = useState("");
+  const { auth, refresh, reLoginNotice } = useCurrentUser();
+  const loginPage = page === "login" || page.startsWith("login?");
+  const loginError = page.startsWith("login?") ? new URLSearchParams(page.slice(6)).get("error") : null;
+  const { providers, reload: reloadProviders } = useGateProviders(auth.status === "guest");
+  const localMode = auth.status === "signed-in" && auth.user.provider === "local";
+  const retryAuth = () => {
+    refresh();
+    reloadProviders();
+  };
   const evaluationPage = page === "tasks" || page.startsWith("run/") || page.startsWith("evaluate?");
   const go = (path: string) => {
     location.hash = path;
@@ -109,7 +134,7 @@ export function App() {
           ? "测评报告"
           : page.startsWith("config/")
             ? "配置维护"
-            : menus.find((menu) => menu.id === page)?.label || "控制台";
+            : allMenus.find((menu) => menu.id === page)?.label || "控制台";
   const descriptions: Record<string, string> = {
     home: "从一次测评开始，让模型能力与执行证据清晰可见。",
     "console/performance": "选择模型服务与 SSH 节点，运行普通推理或 AgentX 轨迹回放。",
@@ -120,8 +145,54 @@ export function App() {
     tasks: "追踪每一次测评，定位每一个问题。",
     reports: "查看测评报告，追溯历史结果。",
     leaderboard: "按来源与比较条件查看模型成绩。",
-    "data-workbench": "评审报告成绩、维护榜单数据及导入官方来源。",
+    "data-workbench": "管理员评审报告成绩、维护榜单数据及导入官方来源；普通用户只读公布榜单。",
+    "admin/users": "查看平台账号、调整角色、停用与恢复账号；所有变更写入审计记录。",
+    "admin/config": "维护预算开关与 Langfuse 链接等平台级配置，保存后立即生效。",
   };
+
+  if (auth.status === "loading") {
+    return <div className="login-shell"><p className="login-loading" role="status">正在校验登录状态…</p></div>;
+  }
+  if (loginPage) {
+    return (
+      <div className="login-shell">
+        <LoginPage error={loginError} onEnter={() => go("console")} localMode={localMode} providers={providers} onRetry={retryAuth} />
+      </div>
+    );
+  }
+  if (auth.status === "error") {
+    // 后端确认身份失败（网络/5xx）：不能确认身份就不放行，提供重试而不是放游客进入。
+    return (
+      <div className="login-shell">
+        <div className="login-page">
+          <div className="login-card" role="alert">
+            <img className="login-logo" src="/brand/autoeval-logo.svg" alt="AutoEval" />
+            <h1>无法确认登录状态</h1>
+            <div className="login-error">
+              <AlertCircle size={16} />
+              后端连接异常或服务不可用，无法校验身份，请检查后端服务后重试。
+            </div>
+            <button className="login-retry" type="button" onClick={refresh}>
+              重试
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (auth.status === "guest") {
+    // 访客（oauth 模式未登录）一律进入登录页；登录方式读取失败或为空时，
+    // 登录页呈现对应错误与重试，后端确认身份之前不放行进入控制台。
+    // 仅当后端确认"会话已失效"才提示重新登录，首次访问只显示登录入口。
+    return (
+      <div className="login-shell">
+        <LoginPage error={null} onEnter={() => go("console")} localMode={false} providers={providers} onRetry={retryAuth} notice={reLoginNotice} />
+      </div>
+    );
+  }
+  const user = auth.status === "signed-in" ? auth.user : undefined;
+  // 管理员及以上（admin / superadmin）可见管理入口；具体操作权力由后端按角色裁决
+  const isAdmin = user?.role === "admin" || user?.role === "superadmin";
 
   const activeMenu = consolePage ? "console" : evaluationPage || page.startsWith("planned-run/") ? "tasks"
     : page.startsWith("report/") ? "reports"
@@ -137,7 +208,7 @@ export function App() {
         </div>
         <div className="workspace">工作空间：本地单工作空间</div>
         <nav aria-label="主菜单">
-          {menus.filter(menu => menu.id !== "data-workbench" || workbenchEnabled).map((menu) => (
+          {(isAdmin ? allMenus : menus).filter(menu => menu.id !== "data-workbench" || (workbenchEnabled && isAdmin)).map((menu) => (
             <a
               key={menu.id}
               aria-label={menu.label}
@@ -167,6 +238,12 @@ export function App() {
           <ChevronRight size={14} />
           <span>{title}</span>
           <Badge>单工作空间</Badge>
+          {user && (
+            <>
+              <span className="breadcrumb-spacer" />
+              <UserArea user={user} onLoggedOut={refresh} notify={setToast} />
+            </>
+          )}
           <AppearanceSettings />
         </div>
         <header className="page-heading">
@@ -221,7 +298,19 @@ export function App() {
         )}
 
         {page === "leaderboard" && (<div className="stack"><PublishedLeaderboard /><details onToggle={(event) => setCandidateScoresOpen(event.currentTarget.open)}><summary>平台运行报告候选成绩（未人工评审）</summary>{candidateScoresOpen && <RealLeaderboard open={(id) => go(`report/${id}`)} />}</details></div>)}
-        {workbenchEnabled && page === "data-workbench" && <DataWorkbench />}
+        {workbenchEnabled && page === "data-workbench" && isAdmin && <DataWorkbench />}
+        {(page.startsWith("admin/") || page === "data-workbench") && user && !isAdmin && (
+          <section className="card admin-forbidden" role="alert">
+            <div className="admin-forbidden-head">
+              <ShieldAlert size={22} />
+              <h2>403 · 无权访问</h2>
+            </div>
+            <p>该页面的评审与维护操作仅管理员可执行。普通用户可使用测评、任务与报告功能，并只读查看榜单；如需权限，请联系管理员调整你的角色。</p>
+            <button className="primary" type="button" onClick={() => go("console")}>返回控制台</button>
+          </section>
+        )}
+        {page === "admin/users" && isAdmin && user && <AdminUsers notify={setToast} viewer={user} />}
+        {page === "admin/config" && isAdmin && <AdminConfig notify={setToast} />}
 
         <footer className="page-foot">
           AutoEval · 智能测评平台
