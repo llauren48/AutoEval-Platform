@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -76,3 +77,57 @@ def test_archive_directory_paginates_immediate_children():
     assert not last["more"]
     assert last["entries"] == [{"name": "100.json", "size": 3, "directory": False, "mtime": 10}]
     assert archive_directory(files, "trial/../trial-other", 0) == {"state": "missing_file"}
+
+
+async def test_harbor_details_include_protected_metadata_and_nested_text(monkeypatch):
+    run = uuid4()
+    job = DatasetExecution(id=uuid4(), task_id="harbor", payload={})
+    row = SimpleNamespace(collection_key=f"harbor-details:{job.id}", created_at=datetime.now(UTC))
+    session = AsyncMock()
+    session.scalar.return_value = None
+    session.scalars.return_value = [row]
+    bundle = {
+        "run_id": str(run),
+        "child_id": str(job.id),
+        "files": [
+            {"path": "details/config.js", "size": 9, "content": "sensitive"},
+            {"path": "details/trial/log.txt", "size": 2, "content": "ok"},
+        ],
+    }
+    monkeypatch.setattr(
+        "autoeval.evaluation.archived_executor_files.read_manifest", lambda *_: bundle
+    )
+    listing = await archived_files(session, None, run, job, "", 0)
+    assert [item["name"] for item in listing["entries"]] == [
+        "details/config.js",
+        "details/trial/log.txt",
+    ]
+    assert listing["entries"][0]["metadata_only"]
+    assert (await archived_files(session, None, run, job, "details/config.js", 0))[
+        "state"
+    ] == "protected"
+    assert (await archived_files(session, None, run, job, "details/trial/log.txt", 0))[
+        "content"
+    ] == "ok"
+
+
+@pytest.mark.skipif(not hasattr(os, "fwalk"), reason="POSIX executor filesystem")
+def test_collect_harbor_details(tmp_path):
+    from autoeval_runtime.planning_runtime import harbor_details
+
+    details = tmp_path / "nested" / "details"
+    trial = details / "trial"
+    trial.mkdir(parents=True)
+    (details / "config.js").write_text("private-test")
+    (trial / "agent.txt").write_text("private-test")
+    (trial / "binary").write_bytes(bytes([0]))
+    (trial / "link").symlink_to(details / "config.js")
+    (tmp_path / "outside.txt").write_text("outside")
+    rows = {r["path"]: r for r in harbor_details(tmp_path, "private-test")}
+    assert set(rows) == {
+        "nested/details/config.js",
+        "nested/details/trial/agent.txt",
+        "nested/details/trial/binary",
+        "nested/details/trial/link",
+    }
+    assert [r["content"] for r in rows.values() if "content" in r] == ["[REDACTED]"]

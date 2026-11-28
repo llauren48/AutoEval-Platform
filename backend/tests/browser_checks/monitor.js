@@ -61,6 +61,8 @@
         ? { state: 'text', content: 'sample', start: 0, end: 6, size: 6 }
         : { state: 'directory', more: false, entries: [
           { name: 'output/case.txt', directory: false, size: 6, mtime: 0, metadata_only: false },
+          { name: 'output/trace.json', directory: false, size: 1500000, mtime: 0, metadata_only: false },
+          { name: 'output/model.bin', directory: false, size: 2000000000, mtime: 0, metadata_only: true },
         ] };
     } else if (url.pathname.endsWith('/capabilities')) {
       data = { executor_files_enabled: window.executorFilesEnabled === true, evaluation_enabled: false, analysis_enabled: false, customer_ssh_enabled: false, workspace_mode: 'single', subject: 'fixture' };

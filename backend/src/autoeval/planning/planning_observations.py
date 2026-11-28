@@ -152,6 +152,12 @@ def terminal_prediction_failures(task, result):
 
 
 async def archive_native(sessions, settings, run_id, child, result, secret):
+    if details := result.get("harbor_details"):
+        if child.payload["compilation"]["config"]["subcommand"] != "harbor_agent":
+            raise ValueError("Unexpected Harbor details")
+        await archive_native_bundle(
+            sessions, settings, run_id, child.id, "harbor-details", {"files": details}, secret
+        )
     trials = result.get("harbor_native_trials")
     if trials:
         if child.payload["compilation"]["config"]["subcommand"] != "harbor_agent":
@@ -188,6 +194,7 @@ async def archive_native_bundle(sessions, settings, run_id, child_id, kind, payl
         raise ValueError("Credential found in native evidence")
     sha = digest(bundle)
     prefix = {
+        "harbor-details": "harbor-details",
         "planning-native": "native-predictions",
         "planning-harbor": "native-harbor-trials",
         "planning-dispatch": "sample-dispatch",
@@ -276,3 +283,11 @@ async def publish_lifecycle(sessions, settings, run_id, child, state, *, final=F
         datetime.now(UTC).isoformat(),
         kind="final" if final else "live",
     )
+    # Return the native observation with its own timestamp and snapshot kind.
+    # The lifecycle event above can repeat a count collected before the job stopped.
+    done = latest.get("finish_count")
+    if final and native and type(done) is int and 0 <= done <= len(child.payload["samples"]):
+        return {
+            key: latest.get(key)
+            for key in ("source", "observed_at", "snapshot_kind", "finish_count", "total_count")
+        }

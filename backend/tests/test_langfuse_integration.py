@@ -84,7 +84,9 @@ async def test_new_import_freezes_full_mode_before_configuration_changes(monkeyp
     assert settings.langfuse_content_mode == "full"
     saved = []
     session = SimpleNamespace(add=saved.append)
-    monkeypatch.setattr("autoeval.reporting.langfuse_integration.write_manifest", lambda *args: None)
+    monkeypatch.setattr(
+        "autoeval.reporting.langfuse_integration.write_manifest", lambda *args: None
+    )
     await archive_trace(session, settings, uuid.uuid4(), uuid.uuid4(), artifact())
     settings.langfuse_content_mode = "structural"
     assert saved[0].content_mode == "full"
@@ -126,10 +128,11 @@ def test_import_configuration_requires_all_backend_fields():
 @pytest.mark.asyncio
 async def test_query_failure_never_sends(monkeypatch):
     import httpx
-    from harborstack.convert.export import Exporter
+
+    from autoeval.reporting import langfuse_integration
 
     sent = []
-    monkeypatch.setattr(Exporter, "send", lambda *args: sent.append(True))
+    monkeypatch.setattr(langfuse_integration, "send_spans", lambda *args: sent.append(True))
 
     async def failure(*args, **kwargs):
         raise httpx.ConnectError("unavailable")
@@ -149,14 +152,19 @@ async def test_query_failure_never_sends(monkeypatch):
 @pytest.mark.parametrize("outcome", ["complete", "partial", "unauthorized"])
 async def test_import_confirmation_and_no_duplicate_send(monkeypatch, tmp_path, outcome):
     import httpx
-    from harborstack.convert import export, scores
+
+    from autoeval.reporting import langfuse_integration
 
     row = SimpleNamespace(attempt_id=uuid.uuid4())
     _, plan = build_plan(artifact(), tmp_path, str(row.attempt_id))
     ids = [format(spec.span_id, "016x") for spec in plan]
     sent = []
-    monkeypatch.setattr(export.Exporter, "send", lambda *args: sent.append(True))
-    monkeypatch.setattr(scores, "backfill", lambda *args, **kwargs: [("reward", 201, "")])
+    monkeypatch.setattr(langfuse_integration, "send_spans", lambda *args: sent.append(True))
+
+    async def accept_score(client, url, **kwargs):
+        return httpx.Response(201, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", accept_score)
 
     async def response(*args, **kwargs):
         return httpx.Response(
@@ -191,3 +199,87 @@ def test_fixed_automation_tool_tree_and_inferred_timing(tmp_path):
     assert plan[tools[0].parent].role == "generation"
     assert rec.reward == 1
     assert tools[0].attributes["atif.timing_source"].startswith("inferred")
+
+
+@pytest.mark.asyncio
+async def test_import_retries_scores_directly_under_container_proxy(monkeypatch, tmp_path):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+    from urllib.parse import urlsplit
+
+    from harborstack.convert.scores import score_id
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+
+    for name in ("http_proxy", "https_proxy", "all_proxy"):
+        for spelling in (name, name.upper()):
+            monkeypatch.setenv(spelling, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "other.invalid")
+
+    data = artifact()
+    del data["files"]["verifier/reward.txt"]
+    data["files"]["verifier/reward.json"] = json.dumps({"reward": 1, "quality": 0.5})
+    received_spans = []
+    scores = []
+
+    class LangfuseHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            assert urlsplit(self.path).path == "/api/public/v2/observations"
+            self.send_response(200)
+            self.end_headers()
+            data = [{"id": span.span_id.hex()} for span in received_spans]
+            self.wfile.write(json.dumps({"data": data}).encode())
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.path == "/api/public/otel/v1/traces":
+                assert self.headers["x-langfuse-ingestion-version"] == "4"
+                batch = ExportTraceServiceRequest.FromString(body)
+                for resource in batch.resource_spans:
+                    for scope in resource.scope_spans:
+                        received_spans.extend(scope.spans)
+                self.send_response(200)
+            else:
+                assert self.path == "/api/public/scores"
+                scores.append(json.loads(body))
+                self.send_response(503 if len(scores) == 1 else 201)
+            self.end_headers()
+
+    row = SimpleNamespace(attempt_id=uuid.uuid4())
+    _, plan = build_plan(data, tmp_path, str(row.attempt_id))
+    trace_id = format(plan[0].trace_id, "032x")
+    with HTTPServer(("127.0.0.1", 0), LangfuseHandler) as server:
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            host = f"http://127.0.0.1:{server.server_port}"
+            settings = Settings(
+                langfuse_host=host,
+                langfuse_browser_url=host,
+                langfuse_public_key="public",
+                langfuse_secret_key="secret",
+                _env_file=None,
+            )
+            with pytest.raises(RuntimeError, match="Score ingestion not confirmed"):
+                await import_one(row, settings, data)
+            first_scores = scores.copy()
+            assert "reward.quality" in [item["name"] for item in first_scores]
+            assert await import_one(row, settings, data) == trace_id
+        finally:
+            server.shutdown()
+            thread.join()
+
+    assert sorted(span.span_id.hex() for span in received_spans) == sorted(
+        format(spec.span_id, "016x") for spec in plan
+    )
+    assert all(span.trace_id.hex() == trace_id for span in received_spans)
+    assert scores == first_scores * 2
+    assert scores[0] == {
+        "name": "reward",
+        "value": 1.0,
+        "dataType": "NUMERIC",
+        "id": score_id(trace_id, "reward"),
+        "traceId": trace_id,
+        "observationId": format(plan[0].span_id, "016x"),
+        "timestamp": plan[0].start_ts,
+    }

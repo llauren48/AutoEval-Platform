@@ -23,7 +23,7 @@ def test_monitor_loading_is_not_reported_as_not_collected(browser_page):
     expect(page.get_by_text("本次运行未采集工具监控。", exact=True)).to_be_visible()
     navigation = page.get_by_role("group", name="任务详情视图")
     expect(navigation.get_by_role("button", name="运行概览")).to_have_attribute("aria-pressed", "true")
-    expect(navigation.get_by_role("button", name="执行器原始文件")).to_have_count(0)
+    expect(navigation.get_by_role("button", name="测评产物")).to_have_count(0)
     navigation.get_by_role("button", name="监控快照").click()
     expect(page.get_by_test_id("monitor-snapshots")).to_be_visible()
     navigation.get_by_role("button", name="执行日志", exact=True).click()
@@ -126,6 +126,39 @@ def test_monitor_progress_unknown_zero_and_completed(browser_page):
     expect(page.get_by_text("5 / 5 · 100%", exact=True)).to_be_visible()
 
 
+def test_completed_dataset_uses_archived_counts_in_overview_and_table(browser_page):
+    page, url, _ = browser_page
+    page.add_init_script(FIXTURE.read_text(encoding="utf-8") + """
+        window.detail.datasets = [{id:'child',dataset:'DeepSWE',state:'running',
+          selected_cases:5,summary:{progress:{finish_count:0,total_count:5}}}];
+        window.monitor.finish_count = 0;
+    """)
+    page.goto(url + "/#run/fixture-run")
+    expect(page.get_by_text("0 / 5 · 0%", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成 0/5", exact=True)).to_be_visible()
+    page.evaluate("""() => {
+        window.detail.state = 'completed';
+        window.detail.datasets[0].state = 'succeeded';
+        window.detail.datasets[0].summary = {observed_cases:5,expected_cases:5};
+    }""")
+    expect(page.get_by_text("5 / 5 · 100%", exact=True)).to_be_visible(timeout=10000)
+    expect(page.get_by_text("已完成 5/5", exact=True)).to_be_visible()
+
+
+def test_terminal_overview_uses_saved_last_observation_without_monitor_counts(browser_page):
+    page, url, _ = browser_page
+    page.add_init_script(FIXTURE.read_text(encoding="utf-8") + """
+        window.detail.state = 'cancelled';
+        window.detail.datasets = [{id:'child',dataset:'DeepSWE',state:'cancelled',
+          summary:{progress:{finish_count:2,total_count:5,stale:true,snapshot_kind:'last_observed'}}}];
+        window.monitor.finish_count = null;
+    """)
+    page.goto(url + "/#run/fixture-run")
+    expect(page.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "40")
+    expect(page.get_by_text("数据已过期，保留最后观测值", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成 2/5（已过期）", exact=True)).to_be_visible()
+
+
 def test_case_list_refreshes_when_running_task_completes(browser_page):
     page, url, _ = browser_page
     page.add_init_script(FIXTURE.read_text(encoding="utf-8") + "\nwindow.savedCases=window.cases;window.cases=[];window.detail.report=null")
@@ -196,10 +229,14 @@ def test_executor_files_open_directly_from_task_navigation(browser_page):
     open_run(page, url)
     nav = page.get_by_role("group", name="任务详情视图")
     expect(nav.get_by_role("button")).to_have_text(
-        ["运行概览", "执行日志", "执行器原始文件", "监控快照", "配置快照"]
+        ["运行概览", "执行日志", "测评产物", "监控快照", "配置快照"]
     )
-    nav.get_by_role("button", name="执行器原始文件").click()
-    files = page.get_by_role("region", name="执行器原始文件")
+    nav.get_by_role("button", name="测评产物").click()
+    files = page.get_by_role("region", name="测评产物")
+    expect(files.get_by_role("rowheader", name="output", exact=True)).to_have_count(1)
+    expect(files.get_by_role("button", name="output/case.txt")).to_have_text("case.txt")
+    expect(files.get_by_role("cell", name="1.5 MB", exact=True)).to_have_attribute("title", "1500000 B")
+    expect(files.get_by_role("cell", name="2 GB", exact=True)).to_have_attribute("title", "2000000000 B")
     files.get_by_role("button", name="output/case.txt").click()
     preview = files.get_by_role("dialog", name="文件预览")
     expect(preview.get_by_label("文件内容")).to_have_text("sample")
