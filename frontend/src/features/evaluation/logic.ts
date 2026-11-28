@@ -41,18 +41,28 @@ export function sampleCounts(done: unknown, total: unknown) {
   return { finish_count: done, total_count: total };
 }
 
-export function archivedProgress(dataset?: DatasetResult) {
-  if (!dataset || !["succeeded", "completed", "failed", "cancelled"].includes(dataset.state)) return null;
-  return sampleCounts(dataset.summary?.observed_cases, dataset.summary?.expected_cases ?? dataset.selected_cases);
+export function datasetSampleProgress(dataset?: DatasetResult) {
+  if (!dataset) return null;
+  const summary = dataset.summary;
+  if (["succeeded", "completed", "failed", "cancelled"].includes(dataset.state)) {
+    const counts = sampleCounts(summary?.observed_cases, summary?.expected_cases ?? dataset.selected_cases);
+    if (counts) return { ...counts, source: "archived_case_executions", snapshot_kind: "final", stale: false };
+  }
+  const p = summary?.progress;
+  if (!p || typeof p !== "object") return null;
+  const observation = p as Record<string, unknown>;
+  const counts = sampleCounts(observation.finish_count, observation.total_count);
+  if (!counts) return null;
+  return {
+    ...counts,
+    source: typeof observation.source === "string" ? observation.source : undefined,
+    snapshot_kind: typeof observation.snapshot_kind === "string" ? observation.snapshot_kind : undefined,
+    stale: observation.stale === true,
+  };
 }
 
 export function datasetProgress(dataset: DatasetResult) {
-  const archived = archivedProgress(dataset);
-  if (archived) return `已完成 ${archived.finish_count}/${archived.total_count}`;
-  const progress = dataset.summary?.progress;
-  if (!progress || typeof progress !== "object") return "未采集样本进度";
-  const p = progress as Record<string, unknown>;
-  return sampleCounts(p.finish_count, p.total_count)
-    ? `已完成 ${p.finish_count}/${p.total_count}${p.stale ? "（已过期）" : ""}`
-    : "执行状态已采集，等待样本计数";
+  const p = datasetSampleProgress(dataset);
+  if (p) return `已完成 ${p.finish_count}/${p.total_count}${p.stale ? "（已过期）" : ""}`;
+  return dataset.summary?.progress ? "执行状态已采集，等待样本计数" : "未采集样本进度";
 }

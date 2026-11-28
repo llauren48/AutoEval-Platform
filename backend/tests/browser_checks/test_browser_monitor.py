@@ -145,6 +145,20 @@ def test_completed_dataset_uses_archived_counts_in_overview_and_table(browser_pa
     expect(page.get_by_text("已完成 5/5", exact=True)).to_be_visible()
 
 
+def test_terminal_overview_uses_saved_last_observation_without_monitor_counts(browser_page):
+    page, url, _ = browser_page
+    page.add_init_script(FIXTURE.read_text(encoding="utf-8") + """
+        window.detail.state = 'cancelled';
+        window.detail.datasets = [{id:'child',dataset:'DeepSWE',state:'cancelled',
+          summary:{progress:{finish_count:2,total_count:5,stale:true,snapshot_kind:'last_observed'}}}];
+        window.monitor.finish_count = null;
+    """)
+    page.goto(url + "/#run/fixture-run")
+    expect(page.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "40")
+    expect(page.get_by_text("数据已过期，保留最后观测值", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成 2/5（已过期）", exact=True)).to_be_visible()
+
+
 def test_case_list_refreshes_when_running_task_completes(browser_page):
     page, url, _ = browser_page
     page.add_init_script(FIXTURE.read_text(encoding="utf-8") + "\nwindow.savedCases=window.cases;window.cases=[];window.detail.report=null")

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiGet, apiGetPage } from "../../shared/api";
-import { archivedProgress, sampleCounts } from "./logic";
+import { datasetSampleProgress, sampleCounts } from "./logic";
 import type { DatasetResult } from "./types";
 
 type Monitor = {
@@ -57,14 +57,17 @@ const stamp = (value?: number | string | null) => {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN");
 };
 
-function MonitorProgress({ value, archived, error = false, stage, terminal = false }: { value: Monitor | null; archived?: ReturnType<typeof archivedProgress>; error?: boolean; stage?: string; terminal?: boolean }) {
-  const counts = archived ?? sampleCounts(value?.finish_count, value?.total_count);
+function MonitorProgress({ value, saved, error = false, stage, terminal = false }: { value: Monitor | null; saved?: ReturnType<typeof datasetSampleProgress>; error?: boolean; stage?: string; terminal?: boolean }) {
+  const monitorCounts = sampleCounts(value?.finish_count, value?.total_count);
+  const useSaved = saved && (saved.source === "archived_case_executions" || !monitorCounts);
+  const counts = useSaved ? saved : monitorCounts;
+  const observation = useSaved ? saved : value;
   const known = counts !== null;
   const done = counts?.finish_count;
   const total = counts?.total_count;
   const percent = counts ? Math.round(counts.finish_count / counts.total_count * 100) : undefined;
-  const stale = !archived && Boolean(value?.stale || error);
-  const kind = archived ? "final" : value?.snapshot_kind || "live";
+  const stale = Boolean(observation?.stale || (!useSaved && error));
+  const kind = observation?.snapshot_kind || "live";
   const waiting = terminal ? "未记录样本进度" : value?.collection_status === "waiting_tool" ? "等待作业启动" : stale ? "等待恢复采集" : "等待样本计数";
   return <div className={`run-progress ${kind}${stale ? " stale" : ""}`} data-testid="run-progress">
     <div className="run-progress-head"><span>样本执行进度</span><b>{known ? `${done} / ${total} · ${percent}%` : waiting}</b></div>
@@ -74,7 +77,7 @@ function MonitorProgress({ value, archived, error = false, stage, terminal = fal
       <i style={known ? { width: `${percent}%` } : undefined} />
     </div>
     <small>{stage && <>当前阶段：{stage} · </>}
-      {stale ? "数据已过期，保留最后观测值" : known ? archived || value?.source === "archived_case_executions" ? "进度来自已归档执行记录，不代表历史实时监控或评分通过" : "进度来自工具执行记录，执行完成不代表评分通过" : terminal ? "任务已结束，未记录有效样本计数" : "样本计数尚未返回，当前阶段与耗时持续更新"}
+      {stale ? "数据已过期，保留最后观测值" : known ? observation?.source === "archived_case_executions" ? "进度来自已归档执行记录，不代表历史实时监控或评分通过" : "进度来自工具执行记录，执行完成不代表评分通过" : terminal ? "任务已结束，未记录有效样本计数" : "样本计数尚未返回，当前阶段与耗时持续更新"}
     </small>
   </div>;
 }
@@ -136,8 +139,8 @@ export function RunProgress({ runId, terminal, stage, state, createdAt, events =
   const { value, loading, error } = useRunMonitor(runId, terminal);
   const datasets = groupAttempts(value?.datasets ?? []);
   const showSampleProgress = results.length <= 1;
-  const archivedOnly = results.filter(row => archivedProgress(row) && !datasets.some(group => group.name === row.dataset));
-  const showDatasetList = (!showSampleProgress && (datasets.length > 0 || archivedOnly.length > 0))
+  const summaryOnly = results.filter(row => datasetSampleProgress(row) && !datasets.some(group => group.name === row.dataset));
+  const showDatasetList = (!showSampleProgress && (datasets.length > 0 || summaryOnly.length > 0))
     || (value?.datasets?.length ?? 0) > 1;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -174,7 +177,7 @@ export function RunProgress({ runId, terminal, stage, state, createdAt, events =
           <summary>
             <span className="dataset-monitor-name">{name}</span>
             <span className="dataset-monitor-state">{STATUS_LABEL[latest.tool_status || ""] || latest.tool_status || "等待中"}{latest.stale && " · 已过期"}</span>
-            <MonitorProgress value={latest} archived={archivedProgress(results.find(row => row.dataset === name))} error={Boolean(error)} terminal={latest.snapshot_kind === "final"} />
+            <MonitorProgress value={latest} saved={datasetSampleProgress(results.find(row => row.dataset === name))} error={Boolean(error)} terminal={latest.snapshot_kind === "final"} />
           </summary>
           <ol className="dataset-monitor-history" aria-label={`${name} 监控记录`}>
             {records.map((item, index) => <li key={item.attempt ?? index}>
@@ -184,12 +187,12 @@ export function RunProgress({ runId, terminal, stage, state, createdAt, events =
             </li>)}
           </ol>
         </details>)}
-        {archivedOnly.map(row => <div key={row.id}><b>{row.dataset}</b>
-          <MonitorProgress archived={archivedProgress(row)} value={null} terminal />
+        {summaryOnly.map(row => <div key={row.id}><b>{row.dataset}</b>
+          <MonitorProgress saved={datasetSampleProgress(row)} value={null} terminal={terminal} />
         </div>)}
         {datasets.length > 0 && <small className="muted">展开数据集可查看采集时间和历史记录。</small>}
       </div> : showSampleProgress
-      ? <MonitorProgress value={value} archived={archivedProgress(results[0])} error={Boolean(error)} terminal={terminal} />
+      ? <MonitorProgress value={value} saved={datasetSampleProgress(results[0])} error={Boolean(error)} terminal={terminal} />
       : <p className="muted">暂无分数据集样本进度。</p>}
     <small className="muted">{endEvent === originalEnd && originalEnd
       ? "总耗时截至原始运行结束，后续证据处理时间单独记录。"

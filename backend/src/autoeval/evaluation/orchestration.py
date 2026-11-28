@@ -290,27 +290,18 @@ async def execute(sessions, settings, run_id, heartbeat=lambda: None, *, round_i
                 continue
             from autoeval.planning.planning_observations import publish_lifecycle
 
-            last_progress = (child.summary or {}).get("progress")
             final_reader = getattr(adapter, "progress", None)
             if final_reader:
                 try:
                     from autoeval.planning.planning_observations import publish
 
-                    observation_progress = await final_reader(job)
-                    await publish(sessions, settings, run_id, child.id, observation_progress)
-                    if (
-                        observation_progress
-                        and observation_progress.get("job_id") == str(child.id)
-                        and type(observation_progress.get("finish_count")) is int
-                        and 0 <= observation_progress["finish_count"] <= len(child.payload["samples"])
-                    ):
-                        last_progress = observation_progress
+                    await publish(sessions, settings, run_id, child.id, await final_reader(job))
                 except (OSError, ValueError, RuntimeError) as exc:
                     logging.getLogger(__name__).warning(
                         "Final progress observation failed run=%s child=%s error_type=%s",
                         run_id, child.id, type(exc).__name__,
                     )
-            await publish_lifecycle(
+            last_progress = await publish_lifecycle(
                 sessions, settings, run_id, child, observation.state, final=True
             )
             try:
@@ -351,7 +342,11 @@ async def execute(sessions, settings, run_id, heartbeat=lambda: None, *, round_i
                 )
                 summary = {"validity": "failed", "reason": reason}
             if frozen.get("task_type") != "performance":
-                summary = with_terminal_progress(summary, len(child.payload["samples"]), last_progress)
+                summary = with_terminal_progress(
+                    summary,
+                    len(child.payload["samples"]),
+                    last_progress or (child.summary or {}).get("progress"),
+                )
             await update_child(
                 sessions, child, state=state, summary=summary, finished_at=datetime.now(UTC)
             )
