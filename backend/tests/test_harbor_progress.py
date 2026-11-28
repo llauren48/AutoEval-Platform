@@ -69,7 +69,7 @@ async def test_publish_partial_snapshot(monkeypatch, source, expected):
     binding = SimpleNamespace(id=uuid4(), latest={"total_count": None})
     sessions = MagicMock()
     sessions.return_value.__aenter__.return_value.scalar = AsyncMock(return_value=binding)
-    save = AsyncMock()
+    save = AsyncMock(side_effect=lambda sessions, settings, binding_id, task, *a, **kw: task)
     monkeypatch.setattr(planning_observations, "save_observation", save)
     for finished in (0, 4, 5):
         progress = {
@@ -87,8 +87,9 @@ async def test_publish_partial_snapshot(monkeypatch, source, expected):
 async def test_monitor_prefers_harbor_counts_to_lifecycle_heartbeat(monkeypatch):
     now = datetime.now(UTC)
     scanned = now - timedelta(seconds=10)
+    child = SimpleNamespace(id=uuid4(), payload={"samples": [{}] * 5})
     binding = SimpleNamespace(
-        id=uuid4(), run_id=uuid4(), identity={"task_name": "child"}, latest=None
+        id=uuid4(), run_id=uuid4(), identity={"task_name": str(child.id)}, latest=None
     )
     sessions = MagicMock()
     session = sessions.return_value.__aenter__.return_value
@@ -99,7 +100,7 @@ async def test_monitor_prefers_harbor_counts_to_lifecycle_heartbeat(monkeypatch)
     monkeypatch.setattr(task_monitor, "read_manifest", lambda *args: None)
 
     async def save(source, stamp, done=None, kind="live"):
-        task = {"task_name": "child", "status": "running", "total_count": 5, "finish_count": done}
+        task = {"task_name": str(child.id), "status": "running", "total_count": 5, "finish_count": done}
         return await task_monitor.save_observation(
             sessions, None, binding.id, task, source, stamp.isoformat(), kind
         )
@@ -114,6 +115,14 @@ async def test_monitor_prefers_harbor_counts_to_lifecycle_heartbeat(monkeypatch)
     current = await save(harbor, scanned + timedelta(seconds=1), 1)
     assert current["finish_count"] == 1
     assert await save(harbor, scanned, 0) == current
+
+    # A late poll must expose the accepted count in the dataset summary as well.
+    summary_progress = await planning_observations.publish(
+        sessions, None, binding.run_id, child,
+        {"job_id": str(child.id), "source": harbor, "observed_at": scanned.isoformat(),
+         "finish_count": 0, "total_count": 5},
+    )
+    assert summary_progress == {"job_id": str(child.id), **current}
     final = await save(harbor, now, 5, "final")
     assert final["snapshot_kind"] == "final"
     assert await save(harbor, now + timedelta(seconds=1), 4) == final

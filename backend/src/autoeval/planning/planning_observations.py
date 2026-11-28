@@ -112,7 +112,7 @@ async def publish(sessions, settings, run_id, child, progress):
         else (binding.latest or {}).get("total_count"),
         "progress_description": description,
     }
-    await save_observation(
+    accepted = await save_observation(
         sessions,
         settings,
         binding.id,
@@ -121,6 +121,9 @@ async def publish(sessions, settings, run_id, child, progress):
         progress["observed_at"],
         kind="final" if final else "live",
     )
+    if source == "harbor_result_files":
+        # The binding may have retained a newer scan or a terminal snapshot.
+        return {"job_id": str(child_id), **accepted}
     return progress
 
 
