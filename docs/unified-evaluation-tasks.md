@@ -21,6 +21,8 @@ Task Planner 仅用于估算耗时和建议执行顺序、数据集并发及 cas
 | 报告证据 | `GET /evaluation-tasks/{id}/report` | 复用对象完整性校验；各数据集成绩独立，不生成综合分 |
 | 清理重试 | `POST /evaluation-tasks/{id}/cleanup` | 保留原清理检查，不重新测评 |
 
+精度任务归档后，数据集的 `summary.progress.finish_count` 按有归档结果的不同样本计数，`total_count` 取本次执行选中的样本数。重复尝试只计一个样本，评分见报告。历史任务详情可从 `observed_cases` 和 `expected_cases`（或 `selected_cases`）显示同一比例。只有工具观测时显示最后采集的进度。性能任务按阶段展示。
+
 以下是精度任务的提交示例。请求体携带最终执行设置。
 
 ```json

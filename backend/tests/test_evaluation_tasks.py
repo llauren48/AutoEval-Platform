@@ -73,6 +73,25 @@ def test_four_dataset_concurrency(request_model):
         request_model(**{**body, "dataset_concurrency": 0})
 
 
+@pytest.mark.parametrize("observed,total", [(5, 5), (111, 113), (0, 5)])
+def test_terminal_progress_uses_archived_samples(observed, total):
+    from autoeval.evaluation.sample_progress import with_terminal_progress
+
+    summary = {"observed_cases": observed, "attempt_count": 120, "upstream_total_score": 0}
+    live = {"finish_count": 0, "total_count": total, "snapshot_kind": "live"}
+    actual = with_terminal_progress(summary, total, live)
+    assert actual == {
+        **summary,
+        "progress": {
+            "source": "archived_case_executions", "snapshot_kind": "final",
+            "finish_count": observed, "total_count": total,
+        },
+    }
+    assert with_terminal_progress({}, total, live)["progress"]["snapshot_kind"] == "last_observed"
+    assert with_terminal_progress(summary, 0, live) == summary
+    assert with_terminal_progress({"observed_cases": total + 1}, total) == {"observed_cases": total + 1}
+
+
 def test_submit_contract_has_only_final_parameters():
     body = submission()
     assert len(SubmitTask(**body).tasks) == 2
@@ -680,6 +699,14 @@ async def test_unified_tasks_isolated_postgres(monkeypatch):
                     assert run.state == "completed"
                     assert evidence.sample_id == "0" and evidence.object_key in objects
                     assert collection.object_key in objects
+
+                response = await c.get(f"/api/autoeval/v1/evaluation-tasks/{retry_id}")
+                assert response.status_code == 200, response.text
+                summary = response.json()["data"]["datasets"][0]["summary"]
+                assert summary["progress"] == {
+                    "finish_count": 1, "total_count": 1,
+                    "source": "archived_case_executions", "snapshot_kind": "final",
+                }
 
                 accepted = await send("r13-cancel-during-container-start", harbor)
                 assert accepted.status_code == 202

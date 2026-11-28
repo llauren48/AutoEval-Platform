@@ -1,4 +1,4 @@
-import type { Config, Param, Target } from "./types";
+import type { Config, DatasetResult, Param, Target } from "./types";
 
 export const RUN_MODES = ["GPQA", "MMMU-Pro", "AutomationBench"] as const;
 
@@ -35,11 +35,24 @@ export const resourceLabel = (kind?: string) =>
 export const formatTime = (value?: string) =>
   value && !Number.isNaN(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN") : "暂无记录";
 
-export const datasetProgress = (summary?: Record<string, unknown> | null) => {
-  const progress = summary?.progress;
+export function sampleCounts(done: unknown, total: unknown) {
+  if (typeof done !== "number" || !Number.isSafeInteger(done) || done < 0 ||
+      typeof total !== "number" || !Number.isSafeInteger(total) || total <= 0 || done > total) return null;
+  return { finish_count: done, total_count: total };
+}
+
+export function archivedProgress(dataset?: DatasetResult) {
+  if (!dataset || !["succeeded", "completed", "failed", "cancelled"].includes(dataset.state)) return null;
+  return sampleCounts(dataset.summary?.observed_cases, dataset.summary?.expected_cases ?? dataset.selected_cases);
+}
+
+export function datasetProgress(dataset: DatasetResult) {
+  const archived = archivedProgress(dataset);
+  if (archived) return `已完成 ${archived.finish_count}/${archived.total_count}`;
+  const progress = dataset.summary?.progress;
   if (!progress || typeof progress !== "object") return "未采集样本进度";
   const p = progress as Record<string, unknown>;
-  return typeof p.finish_count === "number" && typeof p.total_count === "number"
+  return sampleCounts(p.finish_count, p.total_count)
     ? `已完成 ${p.finish_count}/${p.total_count}${p.stale ? "（已过期）" : ""}`
     : "执行状态已采集，等待样本计数";
-};
+}

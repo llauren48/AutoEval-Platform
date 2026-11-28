@@ -126,6 +126,25 @@ def test_monitor_progress_unknown_zero_and_completed(browser_page):
     expect(page.get_by_text("5 / 5 · 100%", exact=True)).to_be_visible()
 
 
+def test_completed_dataset_uses_archived_counts_in_overview_and_table(browser_page):
+    page, url, _ = browser_page
+    page.add_init_script(FIXTURE.read_text(encoding="utf-8") + """
+        window.detail.datasets = [{id:'child',dataset:'DeepSWE',state:'running',
+          selected_cases:5,summary:{progress:{finish_count:0,total_count:5}}}];
+        window.monitor.finish_count = 0;
+    """)
+    page.goto(url + "/#run/fixture-run")
+    expect(page.get_by_text("0 / 5 · 0%", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成 0/5", exact=True)).to_be_visible()
+    page.evaluate("""() => {
+        window.detail.state = 'completed';
+        window.detail.datasets[0].state = 'succeeded';
+        window.detail.datasets[0].summary = {observed_cases:5,expected_cases:5};
+    }""")
+    expect(page.get_by_text("5 / 5 · 100%", exact=True)).to_be_visible(timeout=10000)
+    expect(page.get_by_text("已完成 5/5", exact=True)).to_be_visible()
+
+
 def test_case_list_refreshes_when_running_task_completes(browser_page):
     page, url, _ = browser_page
     page.add_init_script(FIXTURE.read_text(encoding="utf-8") + "\nwindow.savedCases=window.cases;window.cases=[];window.detail.report=null")

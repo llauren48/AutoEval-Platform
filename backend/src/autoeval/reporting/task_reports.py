@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from autoeval.catalog.datasets import canonical_manifest, read_manifest, write_manifest
 from autoeval.evaluation.models import DatasetExecution, EvaluationReport, ResultArchiveRevision
+from autoeval.evaluation.sample_progress import report_summary, with_terminal_progress
 from autoeval.infrastructure.models import EvaluationRun, RunSnapshot
 from autoeval.reporting.models import UnifiedCollection
 from autoeval.reporting.result_identity import normalize_result_identities
@@ -281,7 +282,7 @@ async def publish_task_report(session, settings, run_id, *, revision_ids=()):
                     DatasetExecution.run_id == run_id, DatasetExecution.task_id == task["task_id"]
                 )
             )
-            summary = (child.summary if child else None) or {
+            summary = report_summary(child.summary if child else None) or {
                 "validity": "failed",
                 "accuracy": None,
                 "scoring_status": "failed",
@@ -463,7 +464,7 @@ async def apply_recovered_state(session, settings, report):
         )
         child.state = "succeeded"
         child.summary = {
-            **section["summary"],
+            **with_terminal_progress(section["summary"], section["summary"]["expected_cases"]),
             "recovery_report_id": str(report.id),
             "recovery_report_sha256": report.sha256,
         }

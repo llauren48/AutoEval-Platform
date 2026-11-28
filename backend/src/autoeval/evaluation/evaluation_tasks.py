@@ -12,6 +12,7 @@ from autoeval.evaluation.models import EvaluationReport, ExecutionRound, Executi
 from autoeval.evaluation.orchestration import child_view
 from autoeval.evaluation.resume_preview import preview_scope
 from autoeval.evaluation.resume_submission import submit_follow_up
+from autoeval.evaluation.sample_progress import with_terminal_progress
 from autoeval.evaluation.service import (
     evaluation_retry_cleanup,
     evaluation_run_detail,
@@ -461,7 +462,7 @@ async def project_follow_up_detail(session, run_id, data, tasks):
             continue
         if name in summaries:
             summary = summaries[name]
-            dataset["summary"] = summary
+            dataset["summary"] = with_terminal_progress(summary, len(task["samples"]))
             dataset["state"] = (
                 "succeeded"
                 if summary["validity"] == "complete"
