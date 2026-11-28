@@ -17,7 +17,8 @@ from autoeval.planning.debug_storage import storage_preflight, verify_store
 from autoeval.resources import ResourceBinding
 from autoeval.resources.docker_executor import DockerExecutor
 from autoeval.resources.models import SSHResourceBinding
-from autoeval.resources.ssh_executor import SSHExecutor
+from autoeval.resources.node_inventory import planning_config, shared_node
+from autoeval.resources.ssh_executor import DockerBindSourceMissing, SSHExecutor
 from autoeval.resources.ssh_resources import connection_for
 from autoeval_runtime.planning_runtime import validate_spec
 
@@ -185,7 +186,7 @@ class PlanningRemoteContainer(ArtifactExecutor):
                     *arguments[index:],
                 ]
             if arguments[-1] == "preflight" and payload and any(
-                t.get("compilation", {}).get("config", {}).get("subcommand") in {"agentx", "llm_perf"}
+                t.get("accuracy_mounts") or t.get("harbor_revision") or t.get("compilation", {}).get("config", {}).get("subcommand") in {"agentx", "llm_perf"}
                 for t in (json.loads(payload) or [])
             ):
                 return self.control.command(client, ["docker", *arguments], payload, timeout=300)
@@ -573,14 +574,7 @@ async def transport(session, settings, inputs):
         row = await session.get(SSHResourceBinding, inputs["resource_id"])
         if row is None:
             raise ValueError("SSH binding missing")
-        import os
-
-        config_path = (
-            os.environ.get("AE_PLANNING_CONTAINER_CONFIG") or settings.planning_container_config
-        )
-        if not config_path:
-            raise ValueError("Explicit remote planning container binding required")
-        bindings = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        bindings = planning_config(settings)
         binding = bindings.get(str(row.id))
         if not binding:
             raise ValueError("Selected SSH resource has no pinned planning container")
@@ -594,6 +588,10 @@ async def transport(session, settings, inputs):
     if row is None:
         raise ValueError("Docker binding missing")
     return PlanningDocker(settings.docker_executable, row.container_id, row.image_id)
+
+
+class NodeEnvironmentUnavailable(ValueError):
+    """A per-dataset registration could not be materialized on the selected node."""
 
 
 class HarborDaemonUnavailable(RuntimeError):
@@ -664,11 +662,14 @@ else:
             if row is None:
                 if getattr(self, "expected_container_id", None):
                     raise ValueError("Previously recorded task container is missing")
-                image_id = self.control.command(
-                    client, ["docker", "image", "inspect", "--format", "{{.Id}}", self.image_id]
-                ).decode().strip()
+                try:
+                    image_id = self.control.command(
+                        client, ["docker", "image", "inspect", "--format", "{{.Id}}", self.image_id]
+                    ).decode().strip()
+                except RuntimeError as exc:
+                    raise NodeEnvironmentUnavailable("shared_image_unavailable") from exc
                 if image_id != self.image_id:
-                    raise ValueError("Pinned execution image is unavailable")
+                    raise NodeEnvironmentUnavailable("shared_image_unavailable")
                 argv = [
                     "docker", "create", "--name", self.name,
                     "--label", "autoeval.dataset_execution=" + self.owner,
@@ -709,7 +710,10 @@ else:
                         argv += [self.image_id]
                 else:
                     argv += ["--entrypoint", "python3", self.image_id, "-c", "import time; time.sleep(10**8)"]
-                self.control.command(client, argv)
+                try:
+                    self.control.command(client, argv)
+                except DockerBindSourceMissing as exc:
+                    raise NodeEnvironmentUnavailable("dataset_mount_unavailable") from exc
                 row = self._find(client)
                 if row is None:
                     raise RuntimeError("Task container creation could not be confirmed")
@@ -752,6 +756,12 @@ raise SystemExit(1)
         return container_id
 
     async def preflight(self, tasks=None):
+        if tasks and (runtime := self.template.get("shared_image")):
+            targets = [readonly_mount_paths(m)[1] for m in self.template["readonly_mounts"]]
+            extra = {"accuracy_mounts": targets}
+            if self.template["family"] == "harbor":
+                extra = {"harbor_revision": runtime["harbor_revision"], "harbor_mounts": targets}
+            tasks = [{**task, **extra} for task in tasks]
         result = await super().preflight(tasks, retained_storage=False)
         if self.template["family"] != "harbor" or not result["execution_ready"]:
             return result
@@ -839,12 +849,7 @@ finally:
 
 
 def executor_templates(settings, resource_id):
-    path = settings.planning_container_config
-    if not path:
-        return {}
-    return json.loads(Path(path).read_text(encoding="utf-8")).get(str(resource_id), {}).get(
-        "executors", {}
-    )
+    return planning_config(settings).get(str(resource_id), {}).get("executors", {})
 
 
 def readonly_mount_paths(mount):
@@ -873,15 +878,52 @@ def readonly_mount_paths(mount):
     return paths
 
 
+def shared_execution_entry(runtime, node, family, task):
+    revision = task["tool"]["revision"]
+    mounts = node["datasets"].get(task.get("dataset"))
+    params = task["compilation"]["config"].get("params", {})
+    if (not isinstance(mounts, list) or not mounts or revision != runtime.aisbench_revision
+            or params.get("ais_bench_root") != runtime.tool_root):
+        return None
+    if any(PurePosixPath(runtime.tool_root).is_relative_to(readonly_mount_paths(m)[1]) for m in mounts):
+        raise ValueError("Dataset mount shadows the image tool root")
+    data_path = (task["compilation"].get("runtime_config", {}).get("datasets_dir")
+                 if family == "aisbench" else params.get("path"))
+    if not data_path or ".." in PurePosixPath(data_path).parts or not any(
+        PurePosixPath(data_path).is_relative_to(readonly_mount_paths(mount)[1])
+        or PurePosixPath(readonly_mount_paths(mount)[1]).is_relative_to(data_path)
+        for mount in mounts
+    ):
+        return None
+    return {
+        **(node.get("harbor", {}) if family == "harbor" else {}),
+        "image_id": runtime.image_id, "revision": revision, "readonly_mounts": mounts,
+    }
+
+
 def execution_template(settings, resource_id, task):
     import re
 
     from autoeval.evaluation.tool_dispatch import tool_for
 
     family = tool_for(task).name
-    entries = executor_templates(settings, resource_id)
+    config = planning_config(settings)
+    frozen = task.get("execution_template")
+    if frozen and (previous := frozen.get("shared_image")) and previous != config.get("aisbench_runtime"):
+        config = config.get("retained_aisbench", {}).get(previous["version"], {})
+        if config.get("aisbench_runtime") != previous:
+            return None
+    node = config.get(str(resource_id), {})
+    entries = node.get("executors", {})
     revision = task["tool"]["revision"]
-    entry = entries.get(f"{family}@{revision}", entries.get(family))
+    runtime = None
+    # Persisted legacy tasks must still resolve against their original template.
+    registration = shared_node(config, resource_id) if family in {"aisbench", "harbor"} else None
+    if registration and (frozen is None or "shared_image" in frozen):
+        runtime, node = registration
+        entry = shared_execution_entry(runtime, node, family, task)
+    else:
+        entry = entries.get(f"{family}@{revision}", entries.get(family))
     if not entry or entry.get("revision") != revision:
         return None
     if family == "harbor" and entry.get("private_docker") is not True:
@@ -901,6 +943,8 @@ def execution_template(settings, resource_id, task):
             if key in {"AE_VALIDATED_DATASETS", "AE_HARBOR_NETWORK_CAPACITY"}
         },
     }
+    if runtime:
+        template["shared_image"] = runtime.model_dump()
     helper = entry.get("rootless_docker_helper")
     if helper is not None:
         if (

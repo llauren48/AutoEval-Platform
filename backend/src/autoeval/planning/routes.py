@@ -435,10 +435,26 @@ async def import_curve(body: CurveInput, request: Request):
         return envelope({"id": str(row.id)}, request)
 
 
+class DatasetEnvironmentPreview(BaseModel):
+    dataset: str
+    assigned_resource_id: str
+    execution_mode: str
+    image_id: str | None
+    readonly_mounts: list[str | dict[str, str]]
+    blocking_reasons: list[str]
+
+
+@router.post("/resources/preview", response_model=Envelope[list[DatasetEnvironmentPreview]])
+async def preview_resources(body: PlanInput, request: Request):
+    async with request.app.state.sessions() as session:
+        inputs = await resolve_inputs(session, request.app.state.settings, body, preview=True)
+    return envelope(inputs["tasks"], request)
+
+
 @router.post("/resources/preflight", status_code=202, response_model=Envelope[JobAccepted])
 async def preflight(body: PlanInput | PerformanceTask, request: Request):
     async with request.app.state.sessions() as session:
-        inputs = await resolve_inputs(session, request.app.state.settings, body)
+        inputs = await resolve_inputs(session, request.app.state.settings, body, preflight=True)
     return await enqueue("preflight", inputs, request)
 
 

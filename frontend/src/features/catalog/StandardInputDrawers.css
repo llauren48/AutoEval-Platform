@@ -1,17 +1,16 @@
-.input-editor { display: grid; gap: 16px; }
 .input-context, .input-editor footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 .input-context { background: #f6f6fc; padding: 14px 16px; border-radius: 8px; }
 .input-context strong, .input-context small { display: block; overflow-wrap: anywhere; }
 .input-context small, .input-editor footer small, .input-parameters small { color: var(--muted); }
 .input-context .link { background: white; border: 1px solid var(--border); padding: 7px 12px; }
 .input-fields, .input-parameters { border: 1px solid var(--border); border-radius: 9px; padding: 16px; min-width: 0; }
-.input-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(210px,100%),1fr)); gap: 12px; }
+.input-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .input-fields h3 { grid-column: 1/-1; }
 .input-fields h3, .input-parameters h3 { margin: 0; }
 .input-fields label, .input-editor details label { display: grid; gap: 6px; min-width: 0; }
 .input-fields input, .input-fields select { width: 100%; min-width: 0; box-sizing: border-box; }
-.input-editor > details, .input-detail > details { padding: 10px 2px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-.input-editor details label { margin-top: 12px; }
+.input-detail > details { padding: 10px 2px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+
 .input-parameters > .spread { margin-bottom: 14px; }
 
 .ssh-directories { grid-column: 1 / -1; container-type: inline-size; }
@@ -25,3 +24,70 @@
 .ssh-directory-row input { font-family: ui-monospace, monospace; }
 .ssh-directories p { font-size: 13px; }
 @container (max-width: 420px) { .ssh-directory-row { grid-template-columns: minmax(0,1fr); } }
+
+.management-drawer[open]:has(> .management-content > .input-editor) {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(760px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+.management-drawer:has(.input-editor) > header {
+  position: static;
+  margin: 0;
+  padding: 14px clamp(16px, 3vw, 26px);
+}
+.management-drawer:has(.input-editor) > header h2 { padding: 0; border: 0; }
+.management-drawer:has(.input-editor) > header button { display: grid; place-items: center; padding: 8px; }
+.management-content:has(> .input-editor) { display: grid; min-height: 0; }
+.input-editor {
+  display: grid;
+  grid-template: minmax(0, 1fr) auto / minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+}
+.input-editor-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 16px;
+  overflow: auto;
+  padding: 20px clamp(12px, 3vw, 26px);
+  background: #f7f8fb;
+}
+.input-editor .input-fields, .input-advanced, .input-editor .input-context {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.input-resource-picker { grid-column: 1 / -1; }
+.input-resource-picker .resource-multi-options label { display: flex; }
+.input-resource-picker input[type="checkbox"] { width: 17px; }
+.input-editor .ssh-directory-label small { display: block; margin-top: 3px; }
+.input-editor .ssh-directories > small, .input-advanced-fields small { display: block; color: var(--muted); }
+.input-advanced summary { cursor: pointer; font-weight: 600; padding: 14px 16px; border-radius: inherit; }
+.input-advanced summary:hover { background: var(--accent-hover); }
+.input-advanced-fields { display: grid; gap: 12px; border-top: 1px solid var(--border); padding: 16px; }
+.input-advanced textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8f9fc;
+  color: inherit;
+  font: 13px/1.55 ui-monospace, Consolas, monospace;
+  resize: vertical;
+}
+.input-feedback:empty { display: none; }
+.input-feedback, .input-editor-body .stack { overflow-wrap: anywhere; min-width: 0; }
+.input-editor footer {
+  padding: 12px clamp(12px, 3vw, 26px);
+  background: white;
+  border-top: 1px solid var(--border);
+}
+.input-editor footer button { margin-left: auto; }
+@media (max-width: 480px) {
+  .input-editor .input-fields { grid-template-columns: minmax(0, 1fr); }
+  .input-editor footer button { width: 100%; }
+}

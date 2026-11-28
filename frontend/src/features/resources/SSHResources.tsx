@@ -6,7 +6,10 @@ import { OffsetPagination } from "../../shared/ui/OffsetPagination";
 import { useEffect, useState } from "react";
 import { apiGetOptions, apiPost } from "../../shared/api";
 
-type Resource = { id: string; binding_key: string; host: string; port: number; username: string; fingerprint: string; workdir: string; native_tool_root: string | null; native_bridge_sha256: string | null; native_lock_sha256: string | null; native_tool_revision: string | null };
+import type { NodeRegistration } from "../evaluation/types";
+import { groupSshHosts, matchesSshHost } from "../planning/sshHosts";
+
+type Resource = NodeRegistration & { id: string; binding_key: string; host: string; port: number; username: string; fingerprint: string; workdir: string; native_tool_root: string | null; native_bridge_sha256: string | null; native_lock_sha256: string | null; native_tool_revision: string | null };
 
 const initialFields = { binding_key: "", host: "", port: "22", username: "", fingerprint: "", workdir: "" };
 
@@ -42,7 +45,7 @@ export function SSHResources({ adding: routeAdding, onAdd, onCancel, onSaved, on
     const controller = new AbortController();
     setLoading(true);
     setLoadError("");
-    apiGetOptions<Resource[]>("/ssh-resources", controller.signal)
+    apiGetOptions<Resource[]>("/ssh-resources?nodes=true", controller.signal)
       .then(({ data }) => { if (!controller.signal.aborted) setRows(data); })
       .catch(() => { if (!controller.signal.aborted) setLoadError("SSH 节点加载失败。"); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -58,25 +61,29 @@ export function SSHResources({ adding: routeAdding, onAdd, onCancel, onSaved, on
         setCredentialRef(reference);
         setSecret("");
       }
-      const row = await apiPost<Resource>("/ssh-resources", { ...fields, port: Number(fields.port), auth_kind: kind, credential_ref: reference, native_tool_root: toolRoot.trim() || null });
+      const row = await apiPost<Resource>("/ssh-resources?node=true", { ...fields, port: Number(fields.port), auth_kind: kind, credential_ref: reference, native_tool_root: toolRoot.trim() || null });
       setCredentialRef("");
       setCreatedId(row.id);
       setMessage("节点已登记，可以验证 SSH 连接。");
     } catch (error) { setMessage(error instanceof Error ? error.message : "SSH资源登记失败。"); }
     finally { setBusy(false); }
   };
-  const validate = async (id: string) => {
+  const validate = async (ids: string[]) => {
     setBusy(true); setMessage("");
-    try {
-      const result = await apiPost<{ evaluation_ready: boolean }>(`/ssh-resources/${id}/validate`);
-      const detail = result.evaluation_ready
-        ? "主机指纹、Python 3、SFTP 与原生 AISBench 已通过检查。"
-        : "主机指纹、Python 3 和 SFTP 已通过检查。";
-      setChecks(previous => ({ ...previous, [id]: { passed: true, detail, time: new Date().toLocaleString() } }));
-    } catch (error) {
-      setChecks(previous => ({ ...previous, [id]: { passed: false, detail: error instanceof Error ? error.message : "SSH 连接验证失败。", time: new Date().toLocaleString() } }));
+    for (const id of ids) {
+      let status: Check;
+      try {
+        const result = await apiPost<{ evaluation_ready: boolean }>(`/ssh-resources/${id}/validate`);
+        const detail = result.evaluation_ready
+          ? "主机指纹、Python 3、SFTP 与原生 AISBench 已通过检查。"
+          : "主机指纹、Python 3 和 SFTP 已通过检查。";
+        status = { passed: true, detail, time: new Date().toLocaleString() };
+      } catch (error) {
+        status = { passed: false, detail: error instanceof Error ? error.message : "SSH 连接验证失败。", time: new Date().toLocaleString() };
+      }
+      setChecks(previous => ({ ...previous, [id]: status }));
     }
-    finally { setBusy(false); }
+    setBusy(false);
   };
   const labels: Record<keyof typeof fields, string> = { binding_key: "节点名称", host: "主机地址", port: "端口", username: "用户名", fingerprint: "已批准主机指纹", workdir: "SSH 执行目录" };
   const resetForm = () => {
@@ -100,7 +107,7 @@ export function SSHResources({ adding: routeAdding, onAdd, onCancel, onSaved, on
       <h2>{fields.binding_key}</h2>
       <p role="status">{message || checks[createdId]?.detail}</p>
       <div className="inline">
-        <button disabled={busy} onClick={() => void validate(createdId)}>验证 SSH 连接</button>
+        <button disabled={busy} onClick={() => void validate([createdId])}>验证 SSH 连接</button>
         <button className="primary" disabled={busy} onClick={finish}>{onBack ? "返回控制台" : "返回资源池"}</button>
       </div>
     </> : <form className="stack" onSubmit={event => { event.preventDefault(); void save(); }}>
@@ -122,7 +129,7 @@ export function SSHResources({ adding: routeAdding, onAdd, onCancel, onSaved, on
     </form>}
   </Card>;
 
-  const filtered = rows.filter(row => row.binding_key.toLowerCase().includes(query.trim().toLowerCase()));
+  const filtered = groupSshHosts(rows).filter(host => matchesSshHost(host, query));
   const page = filtered.slice(offset, offset + REGISTRY_PAGE_SIZE);
   return <Card className="stack ssh-pool">
     <div className="spread"><h2>SSH 节点</h2><div className="inline">
@@ -131,17 +138,35 @@ export function SSHResources({ adding: routeAdding, onAdd, onCancel, onSaved, on
     </div></div>
     <p className="muted">连接验证检查 SSH 基础环境。容器工具和数据目录按测评任务预检。</p>
     {loading ? <p role="status">正在加载节点…</p> : loadError ? <div className="inline"><p role="alert">{loadError}</p><button onClick={() => setRevision(value => value + 1)}>重新加载</button></div> : !rows.length ? <p>当前资源池为空。添加节点后即可回控制台选择。</p> : <>
-      <input type="search" aria-label="搜索节点名称" placeholder="搜索节点名称" value={query} onChange={event => { setQuery(event.target.value); setOffset(0); }} />
-      {page.length ? <TableWrap><table><thead><tr><th>节点名称</th><th>SSH 连接</th><th>工具能力</th><th>操作</th></tr></thead><tbody>
-        {page.map(row => {
-          const check = checks[row.id];
-          return <tr key={row.id}>
-            <td>{row.binding_key}<small>{row.username}@{row.host}:{row.port}</small></td>
-            <td><Badge tone={check ? check.passed ? "green" : "red" : "gray"}>{check ? check.passed ? "验证通过" : "验证失败" : "未验证"}</Badge>
-              {check && <details><summary>{check.time}</summary><p>{check.detail}</p></details>}
+      <input type="search" aria-label="搜索节点名称或 SSH 地址" placeholder="搜索节点名称或 SSH 地址" value={query} onChange={event => { setQuery(event.target.value); setOffset(0); }} />
+      {page.length ? <TableWrap><table><thead><tr><th>节点名称</th><th>SSH 连接</th><th>执行环境</th><th>操作</th></tr></thead><tbody>
+        {page.map(host => {
+          const [row] = host.resources;
+          const grouped = host.resources.length > 1;
+          const checked = host.resources.map(resource => checks[resource.id]).filter(Boolean);
+          const failed = checked.filter(check => !check.passed).length;
+          const passed = !failed && checked.length === host.resources.length;
+          const status = failed ? (grouped ? `${failed} 项验证失败` : "验证失败") : passed ? "验证通过" : checked.length ? `已验证 ${checked.length}/${host.resources.length}` : "未验证";
+          return <tr key={host.key}>
+            <td>{host.label}{host.login && host.login !== host.label && <small>{host.login}</small>}</td>
+            <td><Badge tone={failed ? "red" : passed ? "green" : "gray"}>{status}</Badge>
+              {!grouped && checked[0] && <details><summary>{checked[0].time}</summary><p>{checked[0].detail}</p></details>}
             </td>
-            <td>{row.native_tool_revision ? <span title={row.native_tool_revision}>AISBench 原生 · {row.native_tool_revision.slice(0, 12)}</span> : "按服务端配置"}</td>
-            <td><button disabled={busy} onClick={() => void validate(row.id)}>验证 SSH 连接</button></td>
+            <td>{grouped ? <details><summary>{host.resources.length} 项执行配置</summary>
+              {host.resources.map(resource => <div key={resource.id} className="ssh-binding-detail">
+                <strong>{resource.binding_key}</strong><small>工作目录 {resource.workdir}</small>
+                {resource.native_tool_revision && <small>AISBench 原生 · {resource.native_tool_revision.slice(0, 12)}</small>}
+                {checks[resource.id] && <small>{checks[resource.id].time} · {checks[resource.id].detail}</small>}
+              </div>)}
+            </details> : row.shared_image ? <details>
+              <summary>AISBench · {row.shared_image.version} · {Object.keys(row.datasets || {}).length} 个数据集</summary>
+              {Object.entries(row.datasets || {}).map(([dataset, registration]) => <div key={dataset}>
+                <strong>{dataset}</strong><small>已登记{registration.last_passed_at && ` · 最近预检通过 ${new Date(registration.last_passed_at).toLocaleString()}`}</small>
+                {registration.mounts.map(mount => <small key={mount.target}>{mount.source} → {mount.target}</small>)}
+              </div>)}
+            </details> : row.native_tool_revision ? <span title={row.native_tool_revision}>AISBench 原生 · {row.native_tool_revision.slice(0, 12)}</span> : "按服务端配置"}</td>
+            <td><button disabled={busy} onClick={() => void validate(host.resources.map(resource => resource.id))}>
+              {grouped ? `验证 ${host.resources.length} 项连接` : "验证 SSH 连接"}</button></td>
           </tr>;
         })}
       </tbody></table></TableWrap> : <p>没有匹配的节点。</p>}

@@ -16,7 +16,9 @@ export type Target = {
   default_config_version_id: string | null;
 };
 
-export type Resource = { id: string; binding_key: string; host?: string; port?: number; native_tool_root?: string | null };
+export type NodeRegistration = Pick<components["schemas"]["SSHNodeView"],
+  "display_name" | "legacy_ids" | "shared_image" | "datasets">;
+export type Resource = NodeRegistration & { id: string; binding_key: string; username?: string; host?: string; port?: number; fingerprint?: string; auth_kind?: string; native_tool_root?: string | null };
 
 export type Profile = {
   provenance?: Record<string, { url?: string | null; revision?: string | null; sha256?: string | null }>;

@@ -17,6 +17,7 @@ from autoeval.planning.artifacts import artifact, current_preflight
 from autoeval.planning.models import PlanningArtifact, PlanningJob
 from autoeval.planning.planning_transport import (
     HarborDaemonUnavailable,
+    NodeEnvironmentUnavailable,
     execution_template,
     isolated_transport,
     transport,
@@ -43,28 +44,36 @@ async def set_job(sessions, identifier, **values):
         row.updated_at = datetime.now(UTC)
 
 
+def blocked_dataset(item, reason):
+    compilation = item.get("compilation", {})
+    config = compilation.get("config", {})
+    template = item.get("execution_template") or {}
+    return {
+        "execution_ready": False,
+        "planner_ready": False,
+        "supported_datasets": [],
+        "blocking_reasons": [reason],
+        "dataset_checks": [{
+            "task_id": item["task_id"],
+            "dataset": item["dataset"],
+            "assigned_resource_id": item["assigned_resource_id"],
+            "data_path": config.get("params", {}).get("path")
+            or compilation.get("runtime_config", {}).get("datasets_dir"),
+            "execution_mode": config.get("subcommand"),
+            "image_id": template.get("image_id"),
+            "readonly_mounts": template.get("readonly_mounts", []),
+            "tool_revision": None,
+            "expected_tool_revision": item["tool"]["revision"],
+            "blocking_reasons": [reason],
+        }],
+    }
+
+
 async def preflight_isolated_task(sessions, settings, job_id, item, check, report):
     resource_id = item["assigned_resource_id"]
     frozen = item["execution_template"]
-    def blocked(reason):
-        return {
-            "execution_ready": False,
-            "planner_ready": False,
-            "supported_datasets": [],
-            "blocking_reasons": [reason],
-            "dataset_checks": [{
-                "task_id": item["task_id"],
-                "dataset": item["dataset"],
-                "assigned_resource_id": resource_id,
-                "data_path": None,
-                "tool_revision": None,
-                "expected_tool_revision": item["tool"]["revision"],
-                "blocking_reasons": [reason],
-            }],
-        }
-
     if execution_template(settings, resource_id, item) != frozen:
-        return blocked("ssh_execution_template_changed")
+        return blocked_dataset(item, "ssh_execution_template_changed")
 
     async with sessions() as session:
         adapter = await isolated_transport(
@@ -85,10 +94,16 @@ async def preflight_isolated_task(sessions, settings, job_id, item, check, repor
         for dataset_check in result["dataset_checks"]:
             dataset_check["assigned_resource_id"] = resource_id
             dataset_check["preflight_evidence"] = evidence
+            if "shared_image" in frozen:
+                dataset_check["execution_mode"] = item["compilation"]["config"]["subcommand"]
+                dataset_check["image_id"] = frozen["image_id"]
+                dataset_check["readonly_mounts"] = frozen["readonly_mounts"]
         return result
+    except NodeEnvironmentUnavailable as exc:
+        return blocked_dataset(item, str(exc))
     except HarborDaemonUnavailable as exc:
         container_id = exc.container_id
-        return blocked("harbor_private_daemon_unavailable")
+        return blocked_dataset(item, "harbor_private_daemon_unavailable")
     finally:
         try:
             await report("cleaning", item, container_id=container_id)
@@ -107,7 +122,7 @@ async def execute_job(sessions, settings, identifier):
             await set_job(sessions, identifier, state="cancelled")
             return
         isolated_preflight = kind == "preflight" and all(
-            t.get("execution_template") for t in inputs["tasks"]
+            t.get("execution_template") or t.get("resolution_error") for t in inputs["tasks"]
         )
         prior_progress = (row.result or {}).get("preflight_progress") if isolated_preflight else None
         adapter = None if isolated_preflight else await transport(session, settings, inputs)
@@ -136,6 +151,10 @@ async def execute_job(sessions, settings, identifier):
             await report("resumed" if prior_progress else "started")
             task_resources = {}
             for item, check in zip(inputs["tasks"], checks, strict=True):
+                if item.get("resolution_error"):
+                    task_resources[item["task_id"]] = blocked_dataset(item, item["resolution_error"])
+                    await report("blocked", item)
+                    continue
                 try:
                     checked, reused = await cached_isolated_check(
                         sessions, settings, identifier, item, check, report, preflight_isolated_task

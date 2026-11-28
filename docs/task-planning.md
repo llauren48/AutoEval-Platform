@@ -65,9 +65,67 @@ python -m pip install 'git+https://github.com/SJTUyh/AutoEval-Benchmark-Adaptor@
 
 控制台在预检后显示匹配主机、工具版本和计划容器数。任务详情显示实际容器短 ID、样本进度和回收状态。创建回执丢失时按子任务身份查回；工具提交结果未知时保留租约并查证。新测评使用 `POST /api/autoeval/v1/evaluation-tasks` 或已有规划提交入口。旧试点提交接口仅回读匹配的历史幂等请求。
 
+### 统一 AISBench 镜像与节点挂载
+
+在 `AE_PLANNING_CONTAINER_CONFIG` 中为试点节点增加 `datasets` 后，该节点启用统一执行模式。API 和各 Worker 须读取同一份完整配置。以下为字段示意，部署时填入实际 ID 和完整提交号，并保留节点原有的固定规划容器与执行模板。
+
+```json
+{
+  "aisbench_runtime": {
+    "version": "pilot-1",
+    "image_id": "sha256:<64 位镜像 ID>",
+    "aisbench_revision": "<40 位 AISBench 提交号>",
+    "harbor_revision": "<40 位 Harbor 提交号>",
+    "tool_root": "/benchmark"
+  },
+  "<主节点 UUID>": {
+    "display_name": "测评机 01",
+    "legacy_ids": [],
+    "datasets": {
+      "GPQA": [{"source": "/srv/data/gpqa", "target": "/benchmark/ais_bench/datasets/gpqa"}],
+      "MMMU-Pro": [{"source": "/srv/data/mmmu-pro", "target": "/benchmark/ais_bench/datasets/mmmu_pro"}],
+      "DeepSWE": [{"source": "/srv/data/deepswe/tasks", "target": "/data/deep-swe/tasks"}],
+      "AutomationBench": [{"source": "/srv/data/automation/tasks", "target": "/data/automation/tasks"}]
+    },
+    "harbor": {
+      "private_docker": true,
+      "rootless_docker_helper": "/opt/autoeval/bin/rootless-docker",
+      "shared_trial_workdir": true,
+      "offline_case_images": true,
+      "environment": {"AE_HARBOR_NETWORK_CAPACITY": "16"}
+    }
+  }
+}
+```
+
+1. 在 `backend/` 运行 `uv run python scripts/review_ssh_nodes.py` 生成只读核对清单。逐项核对地址、端口、账号、指纹、认证方式、工作目录、执行模板和已绑定快照。确认登录权限与数据访问等价后，将旧 UUID 填入主节点的 `legacy_ids`。同址不同账号分开登记。旧记录保留在数据库中，`display_name` 可以独立修改。
+2. 运维按数据集填写挂载。一个数据集可以登记多个只读目录；容器目标路径须与编译配置对应。用户在资源池展开节点可以查看路径及最近一次对应镜像和挂载的成功预检时间。源目录调整后，在控制台重新预检。当前执行资格仍按任务、配置、清单和有效期核验。
+3. 新版页面请求 `GET /api/autoeval/v1/ssh-resources?nodes=true` 获取节点视图。旧列表和旧快照仍使用原始资源 ID。节点登记使用 `POST /api/autoeval/v1/ssh-resources?node=true`，同一登录环境重复登记返回 409。业务提交仍携带 `resource_ids`，预检、派发与恢复沿用已冻结的节点 UUID。
+4. 切换前分别预检四个数据集，验证固定镜像、所选数据、评分文件与完整工具提交，再运行一个无模型的离线 Harbor trial。GPQA 和 MMMU-Pro 使用 `llm_accuracy`，DeepSWE 和 AutomationBench 使用 `harbor_agent`。镜像中 AISBench 启动 Harbor，trial 使用该节点独立的 Docker 环境。
+5. 升级时使用新版本名。需要让旧统一镜像任务在原环境续跑时，在顶层 `retained_aisbench` 下以旧版本名为键保存那一版的 `aisbench_runtime` 和相应节点登记，并保留旧镜像及挂载。历史任务只使用与冻结模板一致的环境。旧格式任务通过节点原有 `executors` 核验。
+
+控制台在选择主机和数据集后调用 `POST /api/autoeval/v1/planning/resources/preview`。该接口只读取已登记的配置，返回各数据集的匹配节点、模式、固定镜像、挂载和缺项。环境预检另行连接 SSH，预检通过时间对应实际检查。
+
+#### 2026-11-28 统一镜像试点
+
+在已登记的 SSH 主机上使用候选镜像 `sha256:fd75eb0ed6eb0f272c6e5275ec7c222b567807da56bdcd5cdc71f441e7b1314a`。对四个数据集分别创建临时执行容器，逐项检查后回收。其 `/benchmark` 的 AISBench 提交为 `e968d1bd`。本次四项完整预检均未通过。
+
+| 数据集 | 现场核对结果 |
+| --- | --- |
+| GPQA | 已登记配置要求 `525ed177` 或 `698ff2d1`。现有精度模板还需要登记独立的宿主机数据挂载。 |
+| MMMU-Pro | 已登记配置要求 `031a7931` 或 `698ff2d1`。候选镜像的评分文件与 `031a7931` 配置锁定的摘要不同。 |
+| DeepSWE | 有一组配置的 AISBench 提交和评分文件匹配，但候选镜像的 Agent 环境未通过完整预检和离线 trial。 |
+| AutomationBench | 已登记配置要求 `698ff2d1`，与候选镜像的提交不同。 |
+
+在同一节点另测已有 Agent 镜像 `sha256:a7ce5417c0846940367fc0659d45de796db8e5849cb88dcc625a3d0b72ea23f1`。其 AISBench 提交 `698ff2d1` 和评分文件匹配四个数据集各一组已登记配置。GPQA 和 MMMU-Pro 缺少按数据集登记的只读源目录。DeepSWE 和 AutomationBench 分别使用自己的实际挂载，各启用一个临时容器，均返回 `harbor_revision_mismatch`。任务解释器加载了 Harbor，但可核验的源码或安装信息无法证明锁定的 `f59cb890`，两个容器均已回收。
+
+在这只 Agent 镜像中，AISBench 调用 Harbor，Harbor 在该试验的私有 Docker 环境中运行一条离线合成任务。结果文件记录奖励 1.0，汇总为 1 项正确、0 项异常，执行环境已回收，模型调用为 0。统一镜像发布仍须补齐精度数据挂载、提供与实际加载代码对应的 Harbor 版本证据，并在同一候选镜像上通过四项完整预检及离线 trial。
+
+现场三条可见旧记录的地址、账号和指纹相同，其中一条使用独立工作目录。此次以临时映射核对了节点列表归并及旧配置预览，部署中的旧 ID、工作目录和默认镜像继续按原配置生效。
+
 ### 查看预检进度与复用记录
 
-资源池中 SSH 地址和端口相同的配置，在控制台归为一台主机。四个数据集可以使用同一主机上的不同资源配置。预检表格按数据集列出四个执行节点，提交请求仍携带所选配置的原始资源 ID。
+旧模式下，资源池和控制台按 SSH 地址、端口、账号、指纹及认证方式归组。一个登录环境有多项旧配置时，节点显示为 `账号@地址:端口`。在资源池展开「执行配置」可查看旧名称、各自的工作目录和连接验证结果。控制台勾选一次主机即可使用其配置，按数据集匹配执行所需的原始资源 ID。已明确登记的统一节点使用运维别名。
 
 检查期间展开「环境检查记录」可查看入队、Worker 接手、容器准备、工具与数据校验、回收和检查结果的时间。任务摘要显示从入队开始的总耗时。表格显示预检容器短 ID，「查看环境检查详情」中可查到完整 ID、原始检查时间和来源预检任务。正式执行容器的 ID 在提交测评并获得容量后出现在任务详情。
 

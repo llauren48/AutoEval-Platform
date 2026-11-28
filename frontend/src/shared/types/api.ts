@@ -470,6 +470,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/autoeval/v1/planning/resources/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Resources */
+        post: operations["preview_resources_api_autoeval_v1_planning_resources_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/autoeval/v1/planning/resources/preflight": {
         parameters: {
             query?: never;
@@ -2242,6 +2259,30 @@ export interface components {
             /** Measured At */
             measured_at?: unknown;
         };
+        /** DatasetEnvironmentPreview */
+        DatasetEnvironmentPreview: {
+            /** Dataset */
+            dataset: string;
+            /** Assigned Resource Id */
+            assigned_resource_id: string;
+            /** Execution Mode */
+            execution_mode: string;
+            /** Image Id */
+            image_id: string | null;
+            /** Readonly Mounts */
+            readonly_mounts: (string | {
+                [key: string]: string;
+            })[];
+            /** Blocking Reasons */
+            blocking_reasons: string[];
+        };
+        /** DatasetMount */
+        DatasetMount: {
+            /** Source */
+            source: string;
+            /** Target */
+            target: string;
+        };
         /** Decision */
         Decision: {
             /** Expected Revision */
@@ -2449,6 +2490,13 @@ export interface components {
             data: {
                 [key: string]: unknown;
             };
+            /** Request Id */
+            request_id: string;
+        };
+        /** Envelope[list[DatasetEnvironmentPreview]] */
+        Envelope_list_DatasetEnvironmentPreview__: {
+            /** Data */
+            data: components["schemas"]["DatasetEnvironmentPreview"][];
             /** Request Id */
             request_id: string;
         };
@@ -2840,6 +2888,15 @@ export interface components {
             /** Request Id */
             request_id: string;
         };
+        /** PageEnvelope[SSHNodeView] */
+        PageEnvelope_SSHNodeView_: {
+            /** Data */
+            data: components["schemas"]["SSHNodeView"][];
+            /** Next Offset */
+            next_offset: number | null;
+            /** Request Id */
+            request_id: string;
+        };
         /** Parameters */
         Parameters: {
             /** Output */
@@ -3049,6 +3106,13 @@ export interface components {
             /** Container Name */
             container_name: string;
         };
+        /** RegisteredDataset */
+        RegisteredDataset: {
+            /** Mounts */
+            mounts: components["schemas"]["DatasetMount"][];
+            /** Last Passed At */
+            last_passed_at: string | null;
+        };
         /** ReportFilters */
         ReportFilters: {
             /** Models */
@@ -3174,6 +3238,51 @@ export interface components {
              */
             value: string;
         };
+        /** SSHNodeView */
+        SSHNodeView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Binding Key */
+            binding_key: string;
+            /** Version */
+            version: number;
+            /** Host */
+            host: string;
+            /** Port */
+            port: number;
+            /** Username */
+            username: string;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Workdir */
+            workdir: string;
+            /** Auth Kind */
+            auth_kind: string;
+            /** Provider Kind */
+            provider_kind: string;
+            /** Native Tool Root */
+            native_tool_root: string | null;
+            /** Native Bridge Sha256 */
+            native_bridge_sha256: string | null;
+            /** Native Lock Sha256 */
+            native_lock_sha256: string | null;
+            /** Native Tool Revision */
+            native_tool_revision: string | null;
+            /** Evaluation Ready */
+            evaluation_ready: boolean;
+            /** Display Name */
+            display_name?: string | null;
+            /** Legacy Ids */
+            legacy_ids?: string[] | null;
+            shared_image?: components["schemas"]["SharedImage"] | null;
+            /** Datasets */
+            datasets?: {
+                [key: string]: components["schemas"]["RegisteredDataset"];
+            } | null;
+        };
         /** SSHResourceInput */
         SSHResourceInput: {
             /** Binding Key */
@@ -3219,6 +3328,19 @@ export interface components {
              * @default false
              */
             archived: boolean;
+        };
+        /** SharedImage */
+        SharedImage: {
+            /** Version */
+            version: string;
+            /** Image Id */
+            image_id: string;
+            /** Aisbench Revision */
+            aisbench_revision: string;
+            /** Harbor Revision */
+            harbor_revision: string;
+            /** Tool Root */
+            tool_root: string;
         };
         /** Submission */
         Submission: {
@@ -4348,6 +4470,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Envelope_IdOnly_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_resources_api_autoeval_v1_planning_resources_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlanInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_list_DatasetEnvironmentPreview__"];
                 };
             };
             /** @description Validation Error */
@@ -6277,6 +6432,7 @@ export interface operations {
                 offset?: number;
                 limit?: number;
                 include_test?: boolean;
+                nodes?: boolean;
             };
             header?: never;
             path?: never;
@@ -6290,7 +6446,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PageEnvelope_SSHNodeView_"];
                 };
             };
             /** @description Validation Error */
@@ -6306,7 +6462,9 @@ export interface operations {
     };
     register_api_autoeval_v1_ssh_resources_post: {
         parameters: {
-            query?: never;
+            query?: {
+                node?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;

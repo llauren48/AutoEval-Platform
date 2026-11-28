@@ -7,6 +7,7 @@ from autoeval.catalog.datasets import DatasetManifest, read_manifest
 from autoeval.catalog.standard_inputs import StandardInputCompilation, StandardInputVersion
 from autoeval.planning.planning_engine import PLANNER_REVISION, apply_concurrency, selected_samples
 from autoeval.resources.models import TargetBinding
+from autoeval.resources.node_inventory import checked_aliases, planning_config
 
 
 async def target_data(session, target_id):
@@ -21,7 +22,7 @@ def manifest_dataset_matches(dataset, asset_key):
     return asset_key in aliases.get(dataset, {dataset})
 
 
-async def resolve_inputs(session, settings, body):
+async def resolve_inputs(session, settings, body, *, preflight=False, preview=False):
     from autoeval.catalog.profiles import resolve_profile
     from autoeval.catalog.registry import Asset, AssetVersion
 
@@ -32,6 +33,11 @@ async def resolve_inputs(session, settings, body):
         from autoeval.evaluation.performance import performance_inputs
 
         return performance_inputs(settings, body, target)
+    try:
+        inventory = planning_config(settings)
+        aliases = await checked_aliases(session, inventory)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise HTTPException(503, "SSH 节点登记配置无效，请检查旧节点映射") from exc
     tasks = []
     for spec in body.tasks:
         if spec.compilation_id in getattr(settings, "archived_compilation_ids", []):
@@ -55,7 +61,11 @@ async def resolve_inputs(session, settings, body):
 
         candidates = body.resource_ids or [body.resource_id]
         if resource_ids is not None:
-            allocate_resource(candidates, resource_ids)
+            resource_ids = list(
+                dict.fromkeys([*resource_ids, *(aliases[i] for i in resource_ids if i in aliases)])
+            )
+            if not (preflight or preview):
+                allocate_resource(candidates, resource_ids)
         if (
             not compiled.get("input_ready")
             or compiled.get("adaptor_revision") != "955089ab32ef696c231d628f5ad0d9da28f430c4"
@@ -88,8 +98,30 @@ async def resolve_inputs(session, settings, body):
         from autoeval.planning.planning_transport import select_execution_template
 
         assignment = select_execution_template(
-            settings, candidates, resource_ids, {"compilation": compiled, "tool": profile.contract}
+            settings,
+            candidates,
+            resource_ids,
+            {"dataset": spec.dataset, "compilation": compiled, "tool": profile.contract},
         )
+        resolution_error = None
+        if assignment is None and (preflight or preview):
+            eligible = [
+                str(i) for i in candidates if resource_ids is None or str(i) in resource_ids
+            ]
+            unified = [i for i in eligible if "datasets" in inventory.get(i, {})]
+            if not eligible:
+                resolution_error = "dataset_resource_mismatch"
+                assignment = str(candidates[0]), None
+            elif unified:
+                assigned = next(
+                    (i for i in unified if spec.dataset in inventory[i]["datasets"]), unified[0]
+                )
+                resolution_error = (
+                    "dataset_mount_missing"
+                    if spec.dataset not in inventory[assigned]["datasets"]
+                    else "dataset_execution_config_mismatch"
+                )
+                assignment = assigned, None
         if assignment is None:
             raise HTTPException(
                 422,
@@ -98,6 +130,18 @@ async def resolve_inputs(session, settings, body):
                 "请配置节点的工具版本、镜像和数据挂载。模板匹配后，平台会自动创建独立容器。",
             )
         assigned_resource, template = assignment
+        if preview:
+            tasks.append(
+                {
+                    "dataset": spec.dataset,
+                    "assigned_resource_id": assigned_resource,
+                    "execution_mode": config["subcommand"],
+                    "image_id": template["image_id"] if template else None,
+                    "readonly_mounts": template["readonly_mounts"] if template else [],
+                    "blocking_reasons": [resolution_error] if resolution_error else [],
+                }
+            )
+            continue
         full = await session.get(DatasetManifest, profile.full_manifest_id)
         source = await asyncio.to_thread(read_manifest, settings, full)
         samples = [
@@ -155,6 +199,7 @@ async def resolve_inputs(session, settings, body):
                 "assigned_resource_id": assigned_resource,
                 "assigned_resource_kind": body.resource_kind,
                 "execution_template": template,
+                **({"resolution_error": resolution_error} if resolution_error else {}),
                 "compilation": compiled,
                 "compilation_sha256": compilation.sha256,
                 "standard_baseline_source": {
@@ -162,7 +207,9 @@ async def resolve_inputs(session, settings, body):
                     "revision": source_input.revision,
                     "repository": source_input.repository,
                     "benchmark": source_input.benchmark,
-                    "file": copy.deepcopy(source_input.payload.get("files", {}).get("baseline.json")),
+                    "file": copy.deepcopy(
+                        source_input.payload.get("files", {}).get("baseline.json")
+                    ),
                 },
                 "manifest_sha256": manifest.sha256,
                 "profile_sha256": profile.sha256,
@@ -187,9 +234,17 @@ def preflight_task_identity(task):
     return {
         key: task.get(key)
         for key in (
-            "task_id", "dataset", "compilation_id", "compilation_sha256",
-            "manifest_id", "manifest_sha256", "profile_sha256", "tool",
-            "assigned_resource_id", "assigned_resource_kind", "execution_template",
+            "task_id",
+            "dataset",
+            "compilation_id",
+            "compilation_sha256",
+            "manifest_id",
+            "manifest_sha256",
+            "profile_sha256",
+            "tool",
+            "assigned_resource_id",
+            "assigned_resource_kind",
+            "execution_template",
         )
     }
 
