@@ -79,19 +79,45 @@ async def read_container_progress(adapter, job):
     )
     value = json.loads(raw)
     if value.get("stage") == "tool_running" and not value.get("source"):
-        script = """import json,sys
+        script = """import json, sys
 from pathlib import Path
-from datetime import datetime,timezone
-root=Path(sys.argv[1]);done=set()
-spec=json.loads((root/'spec.json').read_text())
-if spec.get('compilation',{}).get('config',{}).get('subcommand')!='harbor_agent':
- print((root/'progress.json').read_text());raise SystemExit(0)
-for p in (root/'output').rglob('result.json'):
- if p.is_symlink() or not p.resolve().is_relative_to(root.resolve()) or p.stat().st_size>2097152:continue
- try:d=json.loads(p.read_text())
- except (ValueError,OSError,UnicodeError):continue
- if isinstance(d,dict) and 'agent_execution' in d and 'verifier_result' in d and d.get('finished_at'):done.add(str(p.parent))
-print(json.dumps({'job_id':root.name,'source':'harbor_result_files','finish_count':len(done),'observed_at':datetime.now(timezone.utc).isoformat(),'snapshot_kind':'live'}))
+from datetime import datetime, timezone
+
+root = Path(sys.argv[1])
+spec = json.loads((root / 'spec.json').read_text())
+if spec.get('compilation', {}).get('config', {}).get('subcommand') != 'harbor_agent':
+    print((root / 'progress.json').read_text())
+    raise SystemExit(0)
+
+contract = spec.get('harbor_dispatch_contract') or {}
+expected = set(contract.get('case_ids', []))
+aliases = contract.get('aliases', {})
+done = set()
+for path in (root / 'output').rglob('result.json'):
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+        continue
+    try:
+        if not path.is_file() or path.stat().st_size > 2097152:
+            continue
+        result = json.loads(path.read_bytes())
+    except (ValueError, OSError):
+        continue
+    if not isinstance(result, dict) or not result.get('finished_at'):
+        continue
+    if 'agent_execution' not in result or 'verifier_result' not in result:
+        continue
+    name = result.get('task_name')
+    if not isinstance(name, str) or not name:
+        continue
+    case_id = aliases.get(name, name)
+    if not expected or case_id in expected:
+        done.add(case_id)
+
+print(json.dumps({
+    'job_id': root.name, 'source': 'harbor_result_files',
+    'finish_count': len(done), 'total_count': len(expected) or None,
+    'observed_at': datetime.now(timezone.utc).isoformat(), 'snapshot_kind': 'live',
+}))
 """
         extra = await asyncio.to_thread(
             adapter.command,

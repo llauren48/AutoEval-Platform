@@ -280,7 +280,9 @@ async def execute(sessions, settings, run_id, heartbeat=lambda: None, *, round_i
                             if progress:
                                 from autoeval.planning.planning_observations import publish
 
-                                await publish(sessions, settings, run_id, child.id, progress)
+                                progress = await publish(
+                                    sessions, settings, run_id, child, progress
+                                )
                                 await update_child(sessions, child, summary={"progress": progress})
                         except (OSError, ValueError, RuntimeError) as exc:
                             logging.getLogger(__name__).warning(
@@ -295,7 +297,7 @@ async def execute(sessions, settings, run_id, heartbeat=lambda: None, *, round_i
                 try:
                     from autoeval.planning.planning_observations import publish
 
-                    await publish(sessions, settings, run_id, child.id, await final_reader(job))
+                    await publish(sessions, settings, run_id, child, await final_reader(job))
                 except (OSError, ValueError, RuntimeError) as exc:
                     logging.getLogger(__name__).warning(
                         "Final progress observation failed run=%s child=%s error_type=%s",

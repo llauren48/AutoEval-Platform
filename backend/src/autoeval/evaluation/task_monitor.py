@@ -237,6 +237,40 @@ def freshness(projection, now=None):
     return result
 
 
+def accept_observation(latest, observation):
+    if not latest:
+        return True
+    if latest["snapshot_kind"] == "final":
+        return False
+
+    # A local lifecycle heartbeat and a remote Harbor scan use different clocks.
+    # Under the binding lock, prefer sample evidence over a live placeholder.
+    def placeholder(row):
+        return (
+            row["source"] == "executor_lifecycle"
+            and row["snapshot_kind"] == "live"
+            and row.get("finish_count") is None
+        )
+
+    def counted_scan(row):
+        done, total = row.get("finish_count"), row.get("total_count")
+        return (
+            row["source"] == "harbor_result_files"
+            and done is not None
+            and total is not None
+            and 0 <= done <= total
+            and total > 0
+        )
+
+    if placeholder(latest) and counted_scan(observation):
+        return True
+    if counted_scan(latest) and placeholder(observation):
+        return False
+    return datetime.fromisoformat(observation["observed_at"]) >= datetime.fromisoformat(
+        latest["observed_at"]
+    )
+
+
 async def save_observation(sessions, settings, binding_id, task, source, observed_at, kind="live"):
     async with sessions() as session, session.begin():
         binding = await session.scalar(
@@ -245,11 +279,7 @@ async def save_observation(sessions, settings, binding_id, task, source, observe
         if binding is None:
             raise ValueError("Monitor binding missing")
         projection = normalize(task, binding.identity, source, observed_at, snapshot_kind=kind)
-        if binding.latest and (
-            binding.latest["snapshot_kind"] == "final"
-            or datetime.fromisoformat(projection["observed_at"])
-            < datetime.fromisoformat(binding.latest["observed_at"])
-        ):
+        if not accept_observation(binding.latest, projection):
             return binding.latest
         # Persist changes/terminal evidence, not a full JSON row every poll.
         changed = not binding.latest or any(
